@@ -461,13 +461,6 @@ func Load() (*LoadResult, error) {
 		return nil, err
 	}
 
-	// Apply GOMODEL_CACHE_DIR: if it was set it targeted LocalCacheConfig.CacheDir,
-	// but applyEnvOverrides skips nil pointers. Allocate Local now so the env var
-	// takes effect, but only if Local isn't already set.
-	if cacheDir := os.Getenv("GOMODEL_CACHE_DIR"); cacheDir != "" && cfg.Cache.Model.Local == nil {
-		cfg.Cache.Model.Local = &LocalCacheConfig{CacheDir: cacheDir}
-	}
-
 	// When no model cache backend was specified at all, default to local.
 	if cfg.Cache.Model.Local == nil && cfg.Cache.Model.Redis == nil {
 		cfg.Cache.Model.Local = &LocalCacheConfig{}
@@ -540,6 +533,29 @@ func applyEnvOverrides(cfg *Config) error {
 	return applyEnvOverridesValue(reflect.ValueOf(cfg).Elem())
 }
 
+// hasEnvDescendants reports whether t (a struct type) contains any field (at
+// any depth) with a non-empty "env" struct tag. Used to decide whether to
+// allocate a nil pointer-to-struct before recursing into it.
+func hasEnvDescendants(t reflect.Type) bool {
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Tag.Get("env") != "" {
+			return true
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && hasEnvDescendants(ft) {
+			return true
+		}
+	}
+	return false
+}
+
 func applyEnvOverridesValue(v reflect.Value) error {
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
@@ -555,9 +571,27 @@ func applyEnvOverridesValue(v reflect.Value) error {
 			}
 			continue
 		}
-		if field.Type.Kind() == reflect.Ptr && !fieldVal.IsNil() {
-			if err := applyEnvOverridesValue(fieldVal.Elem()); err != nil {
-				return err
+		if field.Type.Kind() == reflect.Ptr {
+			if fieldVal.IsNil() {
+				// Only allocate if the pointed-to struct has env-tagged descendants;
+				// otherwise leave it nil so optional config sections stay absent.
+				elemType := field.Type.Elem()
+				if elemType.Kind() != reflect.Struct || !hasEnvDescendants(elemType) {
+					continue
+				}
+				// Allocate a zero-value struct so env vars can populate its fields.
+				newVal := reflect.New(elemType)
+				if err := applyEnvOverridesValue(newVal.Elem()); err != nil {
+					return err
+				}
+				// Only keep the allocation if at least one field was actually set.
+				if !reflect.DeepEqual(newVal.Elem().Interface(), reflect.Zero(elemType).Interface()) {
+					fieldVal.Set(newVal)
+				}
+			} else {
+				if err := applyEnvOverridesValue(fieldVal.Elem()); err != nil {
+					return err
+				}
 			}
 			continue
 		}

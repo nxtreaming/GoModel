@@ -636,3 +636,64 @@ func TestValidateBodySizeLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_EnvOnlyRedisModelCache(t *testing.T) {
+	clearAllConfigEnvVars(t)
+
+	withTempDir(t, func(_ string) {
+		t.Setenv("REDIS_URL", "redis://env-host:6379")
+		t.Setenv("REDIS_KEY_MODELS", "env:models")
+		t.Setenv("REDIS_TTL_MODELS", "7200")
+
+		result, err := Load()
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+		cfg := result.Config
+
+		if cfg.Cache.Model.Redis == nil {
+			t.Fatal("expected Cache.Model.Redis to be allocated from env vars")
+		}
+		if cfg.Cache.Model.Redis.URL != "redis://env-host:6379" {
+			t.Errorf("expected REDIS_URL=redis://env-host:6379, got %s", cfg.Cache.Model.Redis.URL)
+		}
+		if cfg.Cache.Model.Redis.Key != "env:models" {
+			t.Errorf("expected REDIS_KEY_MODELS=env:models, got %s", cfg.Cache.Model.Redis.Key)
+		}
+		if cfg.Cache.Model.Redis.TTL != 7200 {
+			t.Errorf("expected REDIS_TTL_MODELS=7200, got %d", cfg.Cache.Model.Redis.TTL)
+		}
+		if cfg.Cache.Model.Local != nil {
+			t.Errorf("expected Cache.Model.Local to be nil when Redis is configured via env, got %v", cfg.Cache.Model.Local)
+		}
+	})
+}
+
+func TestLoad_EnvOnlyRedisResponseCache(t *testing.T) {
+	clearAllConfigEnvVars(t)
+
+	withTempDir(t, func(_ string) {
+		t.Setenv("REDIS_URL", "redis://env-host:6379")
+		t.Setenv("REDIS_KEY_RESPONSES", "env:responses")
+		t.Setenv("REDIS_TTL_RESPONSES", "1800")
+
+		result, err := Load()
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+		cfg := result.Config
+
+		if cfg.Cache.Response.Simple.Redis == nil {
+			t.Fatal("expected Cache.Response.Simple.Redis to be allocated from env vars")
+		}
+		if cfg.Cache.Response.Simple.Redis.URL != "redis://env-host:6379" {
+			t.Errorf("expected REDIS_URL=redis://env-host:6379, got %s", cfg.Cache.Response.Simple.Redis.URL)
+		}
+		if cfg.Cache.Response.Simple.Redis.Key != "env:responses" {
+			t.Errorf("expected REDIS_KEY_RESPONSES=env:responses, got %s", cfg.Cache.Response.Simple.Redis.Key)
+		}
+		if cfg.Cache.Response.Simple.Redis.TTL != 1800 {
+			t.Errorf("expected REDIS_TTL_RESPONSES=1800, got %d", cfg.Cache.Response.Simple.Redis.TTL)
+		}
+	})
+}
