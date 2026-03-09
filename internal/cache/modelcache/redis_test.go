@@ -99,33 +99,42 @@ func TestRedisModelCache_DefaultKeyAndTTL(t *testing.T) {
 }
 
 func TestRedisModelCacheWithStore_CloseDoesNotCloseSharedStore(t *testing.T) {
-	store := cache.NewMapStore()
-	c := NewRedisModelCacheWithStore(store, "test:models", time.Hour)
+	spy := &spyStore{}
+	c := NewRedisModelCacheWithStore(spy, "test:models", time.Hour)
 
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-
-	// Store must still be usable after the cache is closed.
-	ctx := context.Background()
-	if err := store.Set(ctx, "probe", []byte("ok"), time.Hour); err != nil {
-		t.Errorf("store.Set after cache Close: %v — shared store was closed unexpectedly", err)
+	if spy.closeCalls != 0 {
+		t.Errorf("shared store Close called %d time(s), want 0", spy.closeCalls)
 	}
-	store.Close()
 }
 
 func TestRedisModelCache_CloseClosesOwnedStore(t *testing.T) {
-	store := cache.NewMapStore()
-	c := &redisModelCache{store: store, key: DefaultRedisKey, ttl: cache.DefaultRedisTTL, owned: true}
+	spy := &spyStore{}
+	c := &redisModelCache{store: spy, key: DefaultRedisKey, ttl: cache.DefaultRedisTTL, owned: true}
 
 	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+		t.Fatalf("first Close: %v", err)
+	}
+	if spy.closeCalls != 1 {
+		t.Errorf("owned store Close called %d time(s) after first Close, want 1", spy.closeCalls)
 	}
 
-	// MapStore.Close is a no-op, so we verify the owned flag drove the call
-	// by confirming Close returned nil (not skipped).
-	// A second Close should also be safe since MapStore.Close is idempotent.
+	// Second Close must not panic or error.
 	if err := c.Close(); err != nil {
 		t.Errorf("second Close on owned cache: %v", err)
 	}
+	if spy.closeCalls != 2 {
+		t.Errorf("owned store Close called %d time(s) after second Close, want 2", spy.closeCalls)
+	}
 }
+
+// spyStore is a cache.Store that records how many times Close has been called.
+type spyStore struct {
+	closeCalls int
+}
+
+func (s *spyStore) Get(_ context.Context, _ string) ([]byte, error)                    { return nil, nil }
+func (s *spyStore) Set(_ context.Context, _ string, _ []byte, _ time.Duration) error   { return nil }
+func (s *spyStore) Close() error                                                        { s.closeCalls++; return nil }
