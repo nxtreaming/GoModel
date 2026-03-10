@@ -1,0 +1,129 @@
+---
+title: "Using GoModel with Codex"
+description: "Step-by-step guide for trying Codex with GoModel and understanding the current limitation."
+---
+
+GoModel is a good fit for Codex because Codex already targets the OpenAI
+Responses API.
+
+Flow:
+
+`Codex -> GoModel -> OpenAI`
+
+## Before you start
+
+- Install Codex on your machine.
+- Choose a GoModel master key, for example `change-me`.
+- Make sure GoModel has the upstream provider key for the models you want to use.
+
+## 1. Run GoModel
+
+Start GoModel with a master key and an OpenAI provider key:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e GOMODEL_MASTER_KEY="change-me" \
+  -e OPENAI_API_KEY="sk-..." \
+  enterpilot/gomodel
+```
+
+## 2. Confirm the Responses API with curl
+
+Before testing Codex itself, you can optionally verify that GoModel answers a
+normal Responses API request:
+
+This step is optional. If you are sure you have configured a valid
+`OPENAI_API_KEY` in GoModel, you can skip it and go straight to
+[step 3](#3-configure-codex-to-use-gomodel).
+
+```bash
+curl -s http://localhost:8080/v1/responses \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4.1-mini",
+    "input": "Reply with exactly ok",
+    "max_output_tokens": 16
+  }'
+```
+
+If the gateway is wired correctly, the response will contain `ok`.
+
+## 3. Configure Codex to use GoModel
+
+Point Codex at GoModel's standard OpenAI-compatible API:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8080/v1
+export OPENAI_API_KEY=change-me
+```
+
+If you keep a Codex provider config file, use a Responses-based provider:
+
+```toml
+[model_providers.gomodel]
+name = "GoModel"
+base_url = "http://localhost:8080/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+```
+
+## 4. Run a Codex test prompt
+
+```bash
+codex exec -m gpt-4.1-mini --disable enable_request_compression \
+  'Reply with exactly ok and no punctuation.'
+```
+
+## 5. Check the traffic in GoModel
+
+Open the GoModel dashboard audit logs:
+
+[http://localhost:8080/admin/dashboard/audit](http://localhost:8080/admin/dashboard/audit)
+
+This lets you confirm that Codex is reaching GoModel even before full support is
+finished. From the same dashboard, you can keep following your GoModel traffic
+and usage as the integration matures.
+
+## Current status
+
+- the target integration path is correct: standard `http://localhost:8080/v1`
+- Codex already uses `POST /v1/responses`, which is what GoModel should support
+- the missing piece on the tested GoModel instance is request decompression for
+  `Content-Encoding: zstd`
+
+## References
+
+- OpenAI Codex discussion: [Deprecating `chat/completions` support in Codex](https://github.com/openai/codex/discussions/7782)
+
+## Validated on March 10, 2026
+
+This guide was validated against:
+
+- a local GoModel instance on `http://localhost:8080`
+- Codex CLI `0.113.0`
+
+Local validation confirmed:
+
+- `POST /v1/responses` returned `200 OK` with `curl`
+- Codex sent requests to `POST /v1/responses`
+- the tested GoModel instance does not yet accept Codex's `Content-Encoding: zstd`
+  request bodies
+
+## Known issues
+
+In the March 10, 2026 validation, Codex reached the correct GoModel endpoint,
+but the request failed because Codex compressed the body with `zstd`.
+
+The observed error from GoModel was:
+
+```json
+{"error":{"message":"invalid request body: invalid character '(' looking for beginning of value","type":"invalid_request_error"}}
+```
+
+Workaround: disable request compression in Codex CLI:
+
+```bash
+codex exec -m gpt-4.1-mini --disable enable_request_compression \
+  'Reply with exactly ok and no punctuation.'
+```

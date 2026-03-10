@@ -1,0 +1,142 @@
+---
+title: "Using GoModel with Claude Code"
+description: "Step-by-step guide for routing Claude Code through GoModel with Anthropic passthrough."
+---
+
+GoModel can sit in front of Claude Code so every request goes through your own
+gateway first.
+
+Flow:
+
+`Claude Code -> GoModel -> Anthropic`
+
+## Before you start
+
+- Install Claude Code on your machine.
+- Choose a GoModel master key, for example `change-me`.
+- Make sure GoModel has an Anthropic upstream credential.
+
+<Note>
+  Claude Code can be routed through GoModel whether or not you personally use a
+  Claude Code subscription. For gateway mode, Claude Code talks to GoModel with
+  `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. GoModel still needs its own
+  `ANTHROPIC_API_KEY` to reach Anthropic upstream.
+</Note>
+
+## How to get `ANTHROPIC_API_KEY`
+
+1. Open the Claude Console and sign in to your API account.
+2. Go to account settings in Console, then create an API key.
+3. Copy the key once and set it for GoModel as `ANTHROPIC_API_KEY`.
+
+Anthropic's API docs state that API keys are created in Console account
+settings.
+
+<Warning>
+  Claude paid plans (Pro, Max, Team, Enterprise) and Claude API Console billing
+  are separate. API key usage is billed as API usage.
+</Warning>
+
+## 1. Run GoModel
+
+Start GoModel with a master key and an Anthropic provider key:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e GOMODEL_MASTER_KEY="change-me" \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  enterpilot/gomodel
+```
+
+## 2. Confirm Anthropic passthrough with curl
+
+Check that the Anthropic passthrough models endpoint responds:
+
+```bash
+curl -s http://localhost:8080/p/anthropic/v1/models \
+  -H "Authorization: Bearer change-me"
+```
+
+Then send one small test message:
+
+```bash
+curl -s http://localhost:8080/p/anthropic/v1/messages \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-3-haiku-20240307",
+    "max_tokens": 16,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with exactly ok"
+      }
+    ]
+  }'
+```
+
+If the gateway is wired correctly, the response will contain `ok`.
+
+## 3. Configure Claude Code to use GoModel
+
+Point Claude Code at GoModel's Anthropic passthrough:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080/p/anthropic
+export ANTHROPIC_AUTH_TOKEN=change-me
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+```
+
+Short Claude Code doc summary: for gateway mode, set `ANTHROPIC_BASE_URL` to
+your gateway URL and `ANTHROPIC_AUTH_TOKEN` to your gateway token, then run
+Claude Code normally. See the official guide:
+[Claude Code LLM gateway docs](https://code.claude.com/docs/en/llm-gateway).
+
+If GoModel is not running on your local machine, replace `localhost:8080` with
+the correct host and port.
+
+## 4. Run a Claude Code test prompt
+
+```bash
+claude -p --output-format text --model claude-3-haiku-20240307 \
+  'Reply with exactly ok and no punctuation.'
+```
+
+The validated result was:
+
+```text
+ok
+```
+
+## 5. Check the traffic in GoModel
+
+Open the GoModel dashboard audit logs:
+
+[http://localhost:8080/admin/dashboard/audit](http://localhost:8080/admin/dashboard/audit)
+
+This is the easiest place to confirm that Claude Code is reaching GoModel and
+to inspect the full request and response trail. From the same dashboard, you
+can keep following your GoModel traffic and usage.
+
+## References
+
+- Anthropic Claude Code gateway docs: [LLM gateway](https://code.claude.com/docs/en/llm-gateway)
+- Anthropic Claude Code settings: [Settings](https://code.claude.com/docs/en/settings)
+- Claude Help: [Managing API key environment variables in Claude Code](https://support.claude.com/en/articles/12304248-managing-api-key-environment-variables-in-claude-code)
+- Claude Help: [Paid Claude plans vs API Console billing](https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console)
+- Claude API docs: [API overview (keys from Console account settings)](https://docs.anthropic.com/en/api/getting-started)
+
+## Validated on March 10, 2026
+
+This guide was validated against:
+
+- a local GoModel instance on `http://localhost:8080`
+- a GoModel branch exposing `/p/{provider}/v1/...`
+- Claude Code `2.1.72`
+
+Local validation confirmed:
+
+- `GET /p/anthropic/v1/models` returned `200 OK`
+- `POST /p/anthropic/v1/messages` returned `200 OK`
+- `claude` returned `ok` when pointed at GoModel

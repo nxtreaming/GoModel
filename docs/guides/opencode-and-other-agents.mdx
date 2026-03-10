@@ -1,0 +1,192 @@
+---
+title: "Using GoModel with OpenCode, Cline, Roo Code, and Kilo Code"
+description: "Step-by-step guide for OpenAI-compatible coding agents with GoModel."
+---
+
+Most coding agents outside Claude Code are easiest to connect to GoModel
+through the standard OpenAI-compatible API.
+
+Flow:
+
+`OpenCode / Cline / Roo Code / Kilo Code -> GoModel -> your upstream providers`
+
+## Before you start
+
+- Choose a GoModel master key, for example `change-me`.
+- Start GoModel with at least one upstream provider key.
+- Use GoModel standard `http://localhost:8080/v1` unless your client
+  specifically requires a full endpoint URL.
+
+## 1. Run GoModel
+
+Start GoModel with a master key and at least one upstream provider:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e GOMODEL_MASTER_KEY="change-me" \
+  -e OPENAI_API_KEY="sk-..." \
+  enterpilot/gomodel
+```
+
+<Note>
+  You can swap `OPENAI_API_KEY` for another provider key if that is what your
+  target models use. The important part is that GoModel has at least one
+  upstream provider configured.
+</Note>
+
+## 2. Confirm the OpenAI-compatible API with curl
+
+```bash
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4.1-mini",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Reply with exactly ok"
+      }
+    ]
+  }'
+```
+
+If the gateway is wired correctly, the response will contain `ok`.
+
+## 3. Configure your coding agent
+
+### OpenCode
+
+Create an `opencode.json` file with a GoModel provider:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "gomodel": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "GoModel",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "{env:OPENAI_API_KEY}"
+      },
+      "models": {
+        "gpt-4.1-mini": {
+          "name": "GPT-4.1 Mini",
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Then export the GoModel key:
+
+```bash
+export OPENAI_API_KEY=change-me
+```
+
+### Cline
+
+In Cline, choose:
+
+- API Provider: `OpenAI Compatible`
+- Base URL: `http://localhost:8080/v1`
+- API Key: `change-me`
+- Model ID: a model returned by `GET /v1/models`
+
+### Roo Code
+
+In Roo Code, choose:
+
+- API Provider: `OpenAI Compatible`
+- Base URL: `http://localhost:8080/v1`
+- API Key: `change-me`
+- Model ID: a model returned by `GET /v1/models`
+
+<Note>
+  Roo Code requires native tool calling. Choose a model and provider path that
+  support OpenAI-compatible tool calling.
+</Note>
+
+### Kilo Code
+
+In Kilo Code, choose:
+
+- API Provider: `OpenAI Compatible`
+- Base URL: `http://localhost:8080/v1`
+- API Key: `change-me`
+- Model ID: a model returned by `GET /v1/models`
+
+Kilo Code also supports a full endpoint URL if you need it:
+
+```text
+http://localhost:8080/v1/chat/completions
+```
+
+Start with the simpler base URL first and only switch to a full endpoint URL if
+your setup requires it.
+
+## 4. Run a test prompt
+
+For OpenCode, this validated command worked:
+
+```bash
+opencode run -m gomodel/gpt-4.1-mini \
+  'Reply with exactly ok and no punctuation.'
+```
+
+The validated result was:
+
+```text
+ok
+```
+
+For Cline, Roo Code, and Kilo Code, save the provider settings above and send a
+small prompt such as:
+
+```text
+Reply with exactly ok and no punctuation.
+```
+
+## 5. Check the traffic in GoModel
+
+Open the GoModel dashboard audit logs:
+
+[http://localhost:8080/admin/dashboard/audit](http://localhost:8080/admin/dashboard/audit)
+
+This is the quickest way to confirm that your coding agent is reaching GoModel
+and to inspect each interaction. From the same dashboard, you can keep
+following your GoModel traffic and usage.
+
+## Current status
+
+- OpenCode was validated locally and worked against standard `http://localhost:8080/v1`
+- Cline, Roo Code, and Kilo Code follow the same OpenAI-compatible setup model
+- Roo Code needs native tool calling support from the selected model
+- Kilo Code can use either a base URL or a full endpoint URL
+
+## References
+
+- OpenCode providers docs: [Providers](https://opencode.ai/docs/providers/)
+- Cline OpenAI-compatible provider docs: [OpenAI Compatible](https://docs.cline.bot/provider-config/openai-compatible)
+- Roo Code OpenAI-compatible provider docs: [OpenAI Compatible](https://docs.roocode.com/providers/openai-compatible)
+- Kilo Code OpenAI-compatible provider docs: [OpenAI Compatible](https://kilo.ai/docs/providers/openai-compatible)
+
+## Validated on March 10, 2026
+
+This guide combines:
+
+- local validation against a GoModel instance on `http://localhost:8080`
+- local validation with OpenCode `1.1.36`
+- official documentation for Cline, Roo Code, and Kilo Code
+
+Local validation confirmed:
+
+- OpenCode worked against `http://localhost:8080/v1`
+- the validated OpenCode request used `POST /v1/chat/completions`
+- GoModel dashboard audit logs showed the OpenCode traffic immediately
