@@ -39,6 +39,7 @@ func ConvertResponsesRequestToChat(req *core.ResponsesRequest) (*core.ChatReques
 		Stream:            req.Stream,
 		StreamOptions:     req.StreamOptions,
 		Reasoning:         req.Reasoning,
+		ExtraFields:       core.CloneRawJSONMap(req.ExtraFields),
 	}
 
 	if req.MaxOutputTokens != nil {
@@ -232,8 +233,9 @@ func convertResponsesInputElement(item core.ResponsesInputElement, index int) (c
 			ContentNull: true,
 			ToolCalls: []core.ToolCall{
 				{
-					ID:   callID,
-					Type: "function",
+					ID:          callID,
+					Type:        "function",
+					ExtraFields: core.CloneRawJSONMap(item.ExtraFields),
 					Function: core.FunctionCall{
 						Name:      name,
 						Arguments: item.Arguments,
@@ -246,10 +248,18 @@ func convertResponsesInputElement(item core.ResponsesInputElement, index int) (c
 		if callID == "" {
 			return core.Message{}, "", core.NewInvalidRequestError(fmt.Sprintf("invalid responses input item at index %d: function_call_output call_id is required", index), nil)
 		}
+		content, err := stringifyResponsesInputValueWithError(item.Output)
+		if err != nil {
+			return core.Message{}, "", core.NewInvalidRequestError(
+				fmt.Sprintf("invalid responses input item at index %d: function_call_output.output must be JSON-serializable", index),
+				err,
+			)
+		}
 		return core.Message{
-			Role:       "tool",
-			ToolCallID: callID,
-			Content:    item.Output,
+			Role:        "tool",
+			ToolCallID:  callID,
+			Content:     content,
+			ExtraFields: core.CloneRawJSONMap(item.ExtraFields),
 		}, "function_call_output", nil
 	default: // message (type="" or "message")
 		role := strings.TrimSpace(item.Role)
@@ -260,7 +270,11 @@ func convertResponsesInputElement(item core.ResponsesInputElement, index int) (c
 		if !ok {
 			return core.Message{}, "", core.NewInvalidRequestError(fmt.Sprintf("invalid responses input item at index %d: unsupported content", index), nil)
 		}
-		return core.Message{Role: role, Content: content}, "message", nil
+		return core.Message{
+			Role:        role,
+			Content:     content,
+			ExtraFields: core.CloneRawJSONMap(item.ExtraFields),
+		}, "message", nil
 	}
 }
 
@@ -280,8 +294,9 @@ func convertResponsesInputMap(item map[string]interface{}, index int) (core.Mess
 			ContentNull: true,
 			ToolCalls: []core.ToolCall{
 				{
-					ID:   callID,
-					Type: "function",
+					ID:          callID,
+					Type:        "function",
+					ExtraFields: rawJSONMapFromUnknownKeys(item, "type", "call_id", "id", "name", "arguments", "status"),
 					Function: core.FunctionCall{
 						Name:      name,
 						Arguments: stringifyResponsesInputValue(item["arguments"]),
@@ -294,10 +309,18 @@ func convertResponsesInputMap(item map[string]interface{}, index int) (core.Mess
 		if callID == "" {
 			return core.Message{}, "", core.NewInvalidRequestError(fmt.Sprintf("invalid responses input item at index %d: function_call_output call_id is required", index), nil)
 		}
+		content, err := stringifyResponsesInputValueWithError(item["output"])
+		if err != nil {
+			return core.Message{}, "", core.NewInvalidRequestError(
+				fmt.Sprintf("invalid responses input item at index %d: function_call_output.output must be JSON-serializable", index),
+				err,
+			)
+		}
 		return core.Message{
-			Role:       "tool",
-			ToolCallID: callID,
-			Content:    stringifyResponsesInputValue(item["output"]),
+			Role:        "tool",
+			ToolCallID:  callID,
+			Content:     content,
+			ExtraFields: rawJSONMapFromUnknownKeys(item, "type", "call_id", "status", "output"),
 		}, "function_call_output", nil
 	}
 
@@ -311,23 +334,36 @@ func convertResponsesInputMap(item map[string]interface{}, index int) (core.Mess
 	if !ok {
 		return core.Message{}, "", core.NewInvalidRequestError(fmt.Sprintf("invalid responses input item at index %d: unsupported content", index), nil)
 	}
-	return core.Message{Role: role, Content: content}, "message", nil
+	return core.Message{
+		Role:        role,
+		Content:     content,
+		ExtraFields: rawJSONMapFromUnknownKeys(item, "type", "role", "status", "content"),
+	}, "message", nil
 }
 
 func cloneResponsesMessage(msg core.Message) core.Message {
 	cloned := msg
 	if len(msg.ToolCalls) > 0 {
-		cloned.ToolCalls = append([]core.ToolCall(nil), msg.ToolCalls...)
+		cloned.ToolCalls = make([]core.ToolCall, len(msg.ToolCalls))
+		for i, call := range msg.ToolCalls {
+			cloned.ToolCalls[i] = cloneResponsesToolCall(call)
+		}
 	}
 	if parts, ok := msg.Content.([]core.ContentPart); ok {
 		clonedParts := make([]core.ContentPart, len(parts))
-		copy(clonedParts, parts)
+		for i, part := range parts {
+			clonedParts[i] = cloneResponsesContentPart(part)
+		}
 		cloned.Content = clonedParts
 	}
+	cloned.ExtraFields = core.CloneRawJSONMap(msg.ExtraFields)
 	return cloned
 }
 
 func canMergeAssistantMessages(current, next core.Message) bool {
+	if len(current.ExtraFields) != 0 || len(next.ExtraFields) != 0 {
+		return false
+	}
 	if !core.HasStructuredContent(current.Content) && !core.HasStructuredContent(next.Content) {
 		return true
 	}
@@ -396,8 +432,6 @@ func ConvertResponsesContentToChatContent(content interface{}) (any, bool) {
 
 func convertResponsesContentParts(parts []interface{}) (any, bool) {
 	typedParts := make([]core.ContentPart, 0, len(parts))
-	texts := make([]string, 0, len(parts))
-	allOutputText := true
 
 	for _, part := range parts {
 		partMap, ok := part.(map[string]interface{})
@@ -412,34 +446,30 @@ func convertResponsesContentParts(parts []interface{}) (any, bool) {
 			if !ok || text == "" {
 				return nil, false
 			}
-			typedParts = append(typedParts, core.ContentPart{Type: "text", Text: text})
-			texts = append(texts, text)
+			typedParts = append(typedParts, core.ContentPart{
+				Type:        "text",
+				Text:        text,
+				ExtraFields: rawJSONMapFromUnknownKeys(partMap, "type", "text"),
+			})
 		case "image_url", "input_image":
-			imageURL, detail, mediaType, ok := extractResponsesImageURL(partMap["image_url"])
+			imageURL, ok := normalizeResponsesImageURLForChat(partMap["image_url"])
 			if !ok {
 				return nil, false
 			}
-			allOutputText = false
 			typedParts = append(typedParts, core.ContentPart{
-				Type: "image_url",
-				ImageURL: &core.ImageURLContent{
-					URL:       imageURL,
-					Detail:    detail,
-					MediaType: mediaType,
-				},
+				Type:        "image_url",
+				ImageURL:    imageURL,
+				ExtraFields: rawJSONMapFromUnknownKeys(partMap, "type", "image_url"),
 			})
 		case "input_audio":
-			data, format, ok := extractResponsesInputAudio(partMap["input_audio"])
+			inputAudio, ok := normalizeResponsesInputAudioForChat(partMap["input_audio"])
 			if !ok {
 				return nil, false
 			}
-			allOutputText = false
 			typedParts = append(typedParts, core.ContentPart{
-				Type: "input_audio",
-				InputAudio: &core.InputAudioContent{
-					Data:   data,
-					Format: format,
-				},
+				Type:        "input_audio",
+				InputAudio:  inputAudio,
+				ExtraFields: rawJSONMapFromUnknownKeys(partMap, "type", "input_audio"),
 			})
 		default:
 			if nested, ok := partMap["content"]; ok {
@@ -448,7 +478,6 @@ func convertResponsesContentParts(parts []interface{}) (any, bool) {
 					return nil, false
 				}
 				typedParts = append(typedParts, core.ContentPart{Type: "text", Text: text})
-				texts = append(texts, text)
 				continue
 			}
 			return nil, false
@@ -457,9 +486,6 @@ func convertResponsesContentParts(parts []interface{}) (any, bool) {
 
 	if len(typedParts) == 0 {
 		return nil, false
-	}
-	if allOutputText {
-		return strings.Join(texts, " "), true
 	}
 	return finalizeResponsesChatContent(typedParts)
 }
@@ -471,31 +497,45 @@ func normalizeTypedResponsesContentPart(part core.ContentPart) (core.ContentPart
 			return core.ContentPart{}, false
 		}
 		return core.ContentPart{
-			Type: "text",
-			Text: part.Text,
+			Type:        "text",
+			Text:        part.Text,
+			ExtraFields: core.CloneRawJSONMap(part.ExtraFields),
 		}, true
 	case "image_url", "input_image":
-		if part.ImageURL == nil || part.ImageURL.URL == "" {
+		if part.ImageURL == nil {
+			return core.ContentPart{}, false
+		}
+		url := strings.TrimSpace(part.ImageURL.URL)
+		if url == "" {
 			return core.ContentPart{}, false
 		}
 		return core.ContentPart{
 			Type: "image_url",
 			ImageURL: &core.ImageURLContent{
-				URL:       part.ImageURL.URL,
-				Detail:    part.ImageURL.Detail,
-				MediaType: part.ImageURL.MediaType,
+				URL:         url,
+				Detail:      strings.TrimSpace(part.ImageURL.Detail),
+				MediaType:   strings.TrimSpace(part.ImageURL.MediaType),
+				ExtraFields: core.CloneRawJSONMap(part.ImageURL.ExtraFields),
 			},
+			ExtraFields: core.CloneRawJSONMap(part.ExtraFields),
 		}, true
 	case "input_audio":
-		if part.InputAudio == nil || part.InputAudio.Data == "" || part.InputAudio.Format == "" {
+		if part.InputAudio == nil {
+			return core.ContentPart{}, false
+		}
+		data := strings.TrimSpace(part.InputAudio.Data)
+		format := strings.TrimSpace(part.InputAudio.Format)
+		if data == "" || format == "" {
 			return core.ContentPart{}, false
 		}
 		return core.ContentPart{
 			Type: "input_audio",
 			InputAudio: &core.InputAudioContent{
-				Data:   part.InputAudio.Data,
-				Format: part.InputAudio.Format,
+				Data:        data,
+				Format:      format,
+				ExtraFields: core.CloneRawJSONMap(part.InputAudio.ExtraFields),
 			},
+			ExtraFields: core.CloneRawJSONMap(part.ExtraFields),
 		}, true
 	default:
 		return core.ContentPart{}, false
@@ -507,51 +547,157 @@ func finalizeResponsesChatContent(parts []core.ContentPart) (any, bool) {
 		return nil, false
 	}
 
+	if !canFlattenResponsesPartsToText(parts) {
+		return parts, true
+	}
+
 	texts := make([]string, 0, len(parts))
 	for _, part := range parts {
-		if part.Type != "text" {
-			return parts, true
-		}
 		texts = append(texts, part.Text)
 	}
 	return strings.Join(texts, " "), true
 }
 
-func extractResponsesImageURL(value interface{}) (url string, detail string, mediaType string, ok bool) {
+func canFlattenResponsesPartsToText(parts []core.ContentPart) bool {
+	for _, part := range parts {
+		if part.Type != "text" {
+			return false
+		}
+		if len(part.ExtraFields) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeResponsesImageURLForChat(value interface{}) (*core.ImageURLContent, bool) {
 	switch v := value.(type) {
 	case string:
-		if v == "" {
-			return "", "", "", false
+		url := strings.TrimSpace(v)
+		if url == "" {
+			return nil, false
 		}
-		return v, "", "", true
+		return &core.ImageURLContent{URL: url}, true
 	case map[string]string:
-		url = v["url"]
-		detail = v["detail"]
-		mediaType = v["media_type"]
-		return url, detail, mediaType, url != ""
+		url := strings.TrimSpace(v["url"])
+		if url == "" {
+			return nil, false
+		}
+		return &core.ImageURLContent{
+			URL:         url,
+			Detail:      strings.TrimSpace(v["detail"]),
+			MediaType:   strings.TrimSpace(v["media_type"]),
+			ExtraFields: rawJSONMapFromUnknownStringKeys(v, "url", "detail", "media_type"),
+		}, true
 	case map[string]interface{}:
-		url, _ = v["url"].(string)
-		detail, _ = v["detail"].(string)
-		mediaType, _ = v["media_type"].(string)
-		return url, detail, mediaType, url != ""
+		url, _ := v["url"].(string)
+		url = strings.TrimSpace(url)
+		if url == "" {
+			return nil, false
+		}
+		detail, _ := v["detail"].(string)
+		mediaType, _ := v["media_type"].(string)
+		return &core.ImageURLContent{
+			URL:         url,
+			Detail:      strings.TrimSpace(detail),
+			MediaType:   strings.TrimSpace(mediaType),
+			ExtraFields: rawJSONMapFromUnknownKeys(v, "url", "detail", "media_type"),
+		}, true
 	default:
-		return "", "", "", false
+		return nil, false
 	}
 }
 
-func extractResponsesInputAudio(value interface{}) (data string, format string, ok bool) {
+func normalizeResponsesInputAudioForChat(value interface{}) (*core.InputAudioContent, bool) {
 	switch v := value.(type) {
 	case map[string]string:
-		data = v["data"]
-		format = v["format"]
-		return data, format, data != "" && format != ""
+		data := strings.TrimSpace(v["data"])
+		format := strings.TrimSpace(v["format"])
+		if data == "" || format == "" {
+			return nil, false
+		}
+		return &core.InputAudioContent{
+			Data:        data,
+			Format:      format,
+			ExtraFields: rawJSONMapFromUnknownStringKeys(v, "data", "format"),
+		}, true
 	case map[string]interface{}:
-		data, _ = v["data"].(string)
-		format, _ = v["format"].(string)
-		return data, format, data != "" && format != ""
+		data, _ := v["data"].(string)
+		format, _ := v["format"].(string)
+		data = strings.TrimSpace(data)
+		format = strings.TrimSpace(format)
+		if data == "" || format == "" {
+			return nil, false
+		}
+		return &core.InputAudioContent{
+			Data:        data,
+			Format:      format,
+			ExtraFields: rawJSONMapFromUnknownKeys(v, "data", "format"),
+		}, true
 	default:
-		return "", "", false
+		return nil, false
 	}
+}
+
+func cloneResponsesToolCall(call core.ToolCall) core.ToolCall {
+	cloned := call
+	cloned.ExtraFields = core.CloneRawJSONMap(call.ExtraFields)
+	cloned.Function.ExtraFields = core.CloneRawJSONMap(call.Function.ExtraFields)
+	return cloned
+}
+
+func cloneResponsesContentPart(part core.ContentPart) core.ContentPart {
+	cloned := part
+	cloned.ExtraFields = core.CloneRawJSONMap(part.ExtraFields)
+	if part.ImageURL != nil {
+		image := *part.ImageURL
+		image.ExtraFields = core.CloneRawJSONMap(part.ImageURL.ExtraFields)
+		cloned.ImageURL = &image
+	}
+	if part.InputAudio != nil {
+		audio := *part.InputAudio
+		audio.ExtraFields = core.CloneRawJSONMap(part.InputAudio.ExtraFields)
+		cloned.InputAudio = &audio
+	}
+	return cloned
+}
+
+func rawJSONMapFromUnknownKeys(src map[string]interface{}, knownKeys ...string) map[string]json.RawMessage {
+	if len(src) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(knownKeys))
+	for _, key := range knownKeys {
+		known[key] = struct{}{}
+	}
+
+	var extras map[string]json.RawMessage
+	for key, value := range src {
+		if _, ok := known[key]; ok {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		if extras == nil {
+			extras = make(map[string]json.RawMessage)
+		}
+		extras[key] = raw
+	}
+	return extras
+}
+
+func rawJSONMapFromUnknownStringKeys(src map[string]string, knownKeys ...string) map[string]json.RawMessage {
+	if len(src) == 0 {
+		return nil
+	}
+
+	converted := make(map[string]interface{}, len(src))
+	for key, value := range src {
+		converted[key] = value
+	}
+	return rawJSONMapFromUnknownKeys(converted, knownKeys...)
 }
 
 func firstNonEmptyString(item map[string]interface{}, keys ...string) string {
@@ -565,17 +711,25 @@ func firstNonEmptyString(item map[string]interface{}, keys ...string) string {
 }
 
 func stringifyResponsesInputValue(value interface{}) string {
+	encoded, err := stringifyResponsesInputValueWithError(value)
+	if err != nil {
+		return ""
+	}
+	return encoded
+}
+
+func stringifyResponsesInputValueWithError(value interface{}) (string, error) {
 	switch v := value.(type) {
 	case nil:
-		return ""
+		return "", nil
 	case string:
-		return v
+		return v, nil
 	default:
 		encoded, err := json.Marshal(v)
 		if err != nil {
-			return ""
+			return "", err
 		}
-		return string(encoded)
+		return string(encoded), nil
 	}
 }
 
@@ -693,26 +847,37 @@ func buildResponsesContentItemsFromParts(parts []core.ContentPart) []core.Respon
 				Annotations: []string{},
 			})
 		case "image_url":
-			if part.ImageURL == nil || part.ImageURL.URL == "" {
+			if part.ImageURL == nil {
+				continue
+			}
+			url := strings.TrimSpace(part.ImageURL.URL)
+			if url == "" {
 				continue
 			}
 			items = append(items, core.ResponsesContentItem{
 				Type: "input_image",
 				ImageURL: &core.ImageURLContent{
-					URL:       part.ImageURL.URL,
-					Detail:    part.ImageURL.Detail,
-					MediaType: part.ImageURL.MediaType,
+					URL:         url,
+					Detail:      strings.TrimSpace(part.ImageURL.Detail),
+					MediaType:   strings.TrimSpace(part.ImageURL.MediaType),
+					ExtraFields: core.CloneRawJSONMap(part.ImageURL.ExtraFields),
 				},
 			})
 		case "input_audio":
-			if part.InputAudio == nil || part.InputAudio.Data == "" || part.InputAudio.Format == "" {
+			if part.InputAudio == nil {
+				continue
+			}
+			data := strings.TrimSpace(part.InputAudio.Data)
+			format := strings.TrimSpace(part.InputAudio.Format)
+			if data == "" || format == "" {
 				continue
 			}
 			items = append(items, core.ResponsesContentItem{
 				Type: "input_audio",
 				InputAudio: &core.InputAudioContent{
-					Data:   part.InputAudio.Data,
-					Format: part.InputAudio.Format,
+					Data:        data,
+					Format:      format,
+					ExtraFields: core.CloneRawJSONMap(part.InputAudio.ExtraFields),
 				},
 			})
 		}

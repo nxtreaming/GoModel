@@ -260,10 +260,10 @@ type CacheConfig struct {
 // ModelCacheConfig holds cache configuration for model registry.
 // Exactly one of Local or Redis must be non-nil.
 type ModelCacheConfig struct {
-	RefreshInterval int                 `yaml:"refresh_interval" env:"CACHE_REFRESH_INTERVAL"`
-	ModelList       ModelListConfig     `yaml:"model_list"`
-	Local           *LocalCacheConfig  `yaml:"local"`
-	Redis           *RedisModelConfig  `yaml:"redis"`
+	RefreshInterval int               `yaml:"refresh_interval" env:"CACHE_REFRESH_INTERVAL"`
+	ModelList       ModelListConfig   `yaml:"model_list"`
+	Local           *LocalCacheConfig `yaml:"local"`
+	Redis           *RedisModelConfig `yaml:"redis"`
 }
 
 // LocalCacheConfig holds local file cache configuration.
@@ -335,6 +335,16 @@ type ServerConfig struct {
 	MasterKey      string `yaml:"master_key" env:"GOMODEL_MASTER_KEY"`   // Optional: Master key for authentication
 	BodySizeLimit  string `yaml:"body_size_limit" env:"BODY_SIZE_LIMIT"` // Max request body size (e.g., "10M", "1024K")
 	SwaggerEnabled bool   `yaml:"swagger_enabled" env:"SWAGGER_ENABLED"` // Whether to expose the Swagger UI at /swagger/index.html
+	// EnableProviderPassthrough exposes provider-native passthrough endpoints
+	// under /p/{provider}/{endpoint}. Default: true
+	EnableProviderPassthrough bool `yaml:"enable_provider_passthrough" env:"ENABLE_PROVIDER_PASSTHROUGH"`
+	// NormalizePassthroughV1Prefix allows /p/{provider}/v1/... style
+	// passthrough routes while keeping /p/{provider}/... as the canonical form.
+	// Default: true
+	NormalizePassthroughV1Prefix bool `yaml:"normalize_passthrough_v1_prefix" env:"NORMALIZE_PASSTHROUGH_V1_PREFIX"`
+	// SupportedPassthroughProviders lists the provider types allowed on
+	// /p/{provider}/... passthrough routes. Default: ["openai", "anthropic"]
+	SupportedPassthroughProviders []string `yaml:"supported_passthrough_providers" env:"SUPPORTED_PASSTHROUGH_PROVIDERS"`
 }
 
 // MetricsConfig holds observability configuration for Prometheus metrics
@@ -395,15 +405,24 @@ type ResilienceConfig struct {
 // buildDefaultConfig returns the single source of truth for all configuration defaults.
 func buildDefaultConfig() *Config {
 	return &Config{
-		Server: ServerConfig{Port: "8080", SwaggerEnabled: true},
+		Server: ServerConfig{
+			Port:                         "8080",
+			SwaggerEnabled:               true,
+			EnableProviderPassthrough:    true,
+			NormalizePassthroughV1Prefix: true,
+			SupportedPassthroughProviders: []string{
+				"openai",
+				"anthropic",
+			},
+		},
 		Cache: CacheConfig{
 			Model: ModelCacheConfig{
 				RefreshInterval: 3600,
 				ModelList: ModelListConfig{
 					URL: "https://raw.githubusercontent.com/ENTERPILOT/ai-model-list/refs/heads/main/models.json",
 				},
-			Local: nil,
-			Redis: nil,
+				Local: nil,
+				Redis: nil,
 			},
 			Response: ResponseCacheConfig{},
 		},
@@ -620,6 +639,20 @@ func applyEnvOverridesValue(v reflect.Value) error {
 			fieldVal.SetString(envVal)
 		case reflect.Bool:
 			fieldVal.SetBool(parseBool(envVal))
+		case reflect.Slice:
+			if field.Type.Elem().Kind() != reflect.String {
+				continue
+			}
+			items := strings.Split(envVal, ",")
+			values := make([]string, 0, len(items))
+			for _, item := range items {
+				trimmed := strings.TrimSpace(item)
+				if trimmed == "" {
+					continue
+				}
+				values = append(values, trimmed)
+			}
+			fieldVal.Set(reflect.ValueOf(values))
 		case reflect.Int:
 			n, err := strconv.Atoi(envVal)
 			if err != nil {

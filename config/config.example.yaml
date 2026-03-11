@@ -7,15 +7,20 @@ server:
   port: "8080"
   master_key: "your-secret-key"
   body_size_limit: "10M"
+  enable_provider_passthrough: true # expose /p/{provider}/{endpoint} passthrough routes
+  normalize_passthrough_v1_prefix: true # allow /p/{provider}/v1/... while keeping /p/{provider}/... canonical
+  supported_passthrough_providers: ["openai", "anthropic"] # providers allowed on /p/{provider}/...
 
 cache:
-  type: "local" # "local" or "redis"
-  cache_dir: ".cache" # local cache directory
-  refresh_interval: 3600 # how often to refresh the model registry (seconds, default: 3600)
-  redis:
-    url: "redis://localhost:6379"
-    key: "gomodel:models"
-    ttl: 86400 # 24 hours in seconds
+  model:
+    refresh_interval: 3600 # how often to refresh the model registry (seconds, default: 3600)
+    local:
+      cache_dir: ".cache" # local cache directory
+    # To use Redis instead of local cache, remove `local` and uncomment:
+    # redis:
+    #   url: "redis://localhost:6379"
+    #   key: "gomodel:models"
+    #   ttl: 86400 # 24 hours in seconds
 
 storage:
   type: "sqlite" # "sqlite", "postgresql", or "mongodb"

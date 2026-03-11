@@ -20,17 +20,25 @@ type Reasoning struct {
 
 // ChatRequest represents the incoming chat completion request
 type ChatRequest struct {
-	Temperature       *float64         `json:"temperature,omitempty"`
-	MaxTokens         *int             `json:"max_tokens,omitempty"`
-	Model             string           `json:"model"`
-	Provider          string           `json:"provider,omitempty"`
-	Messages          []Message        `json:"messages"`
-	Tools             []map[string]any `json:"tools,omitempty"`
-	ToolChoice        any              `json:"tool_choice,omitempty"` // string or object
-	ParallelToolCalls *bool            `json:"parallel_tool_calls,omitempty"`
-	Stream            bool             `json:"stream,omitempty"`
-	StreamOptions     *StreamOptions   `json:"stream_options,omitempty"`
-	Reasoning         *Reasoning       `json:"reasoning,omitempty"`
+	Temperature       *float64                   `json:"temperature,omitempty"`
+	MaxTokens         *int                       `json:"max_tokens,omitempty"`
+	Model             string                     `json:"model"`
+	Provider          string                     `json:"provider,omitempty"`
+	Messages          []Message                  `json:"messages"`
+	Tools             []map[string]any           `json:"tools,omitempty"`
+	ToolChoice        any                        `json:"tool_choice,omitempty"` // string or object
+	ParallelToolCalls *bool                      `json:"parallel_tool_calls,omitempty"`
+	Stream            bool                       `json:"stream,omitempty"`
+	StreamOptions     *StreamOptions             `json:"stream_options,omitempty"`
+	Reasoning         *Reasoning                 `json:"reasoning,omitempty"`
+	ExtraFields       map[string]json.RawMessage `json:"-" swaggerignore:"true"`
+}
+
+func (r *ChatRequest) semanticSelector() (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	return r.Model, r.Provider
 }
 
 // WithStreaming returns a shallow copy of the request with Stream set to true.
@@ -55,21 +63,24 @@ type Message struct {
 	//nolint:govet // Intentional duplicate json tag for Swagger docs: content is null OR string OR []ContentPart.
 	// ContentSchema documents that `content` accepts either a plain string
 	// or an array of ContentPart values.
-	ContentSchema []ContentPart `json:"content,omitempty" extensions:"x-oneOf=[{\"type\":\"null\"},{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/core.ContentPart\"}}]"`
-	ToolCalls     []ToolCall    `json:"tool_calls,omitempty"`
+	ContentSchema []ContentPart              `json:"content,omitempty" extensions:"x-oneOf=[{\"type\":\"null\"},{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/core.ContentPart\"}}]"`
+	ToolCalls     []ToolCall                 `json:"tool_calls,omitempty"`
+	ExtraFields   map[string]json.RawMessage `json:"-" swaggerignore:"true"`
 }
 
 // ToolCall represents a single tool invocation emitted by a model.
 type ToolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function FunctionCall `json:"function"`
+	ID          string                     `json:"id"`
+	Type        string                     `json:"type"`
+	Function    FunctionCall               `json:"function"`
+	ExtraFields map[string]json.RawMessage `json:"-" swaggerignore:"true"`
 }
 
 // FunctionCall contains the function name and serialized arguments payload.
 type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Name        string                     `json:"name"`
+	Arguments   string                     `json:"arguments"`
+	ExtraFields map[string]json.RawMessage `json:"-" swaggerignore:"true"`
 }
 
 // ChatResponse represents the chat completion response
@@ -95,8 +106,9 @@ type ResponseMessage struct {
 	Role    string         `json:"role"`
 	Content MessageContent `json:"content"`
 	//nolint:govet // Intentional duplicate json tag for Swagger docs: content is null OR string OR []ContentPart.
-	ContentSchema []ContentPart `json:"content,omitempty" extensions:"x-oneOf=[{\"type\":\"null\"},{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/core.ContentPart\"}}]"`
-	ToolCalls     []ToolCall    `json:"tool_calls,omitempty"`
+	ContentSchema []ContentPart              `json:"content,omitempty" extensions:"x-oneOf=[{\"type\":\"null\"},{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/core.ContentPart\"}}]"`
+	ToolCalls     []ToolCall                 `json:"tool_calls,omitempty"`
+	ExtraFields   map[string]json.RawMessage `json:"-" swaggerignore:"true"`
 }
 
 // PromptTokensDetails holds extended input token breakdown (OpenAI/xAI).
@@ -249,11 +261,19 @@ type ModelsResponse struct {
 
 // EmbeddingRequest represents the incoming embeddings request (OpenAI-compatible).
 type EmbeddingRequest struct {
-	Model          string `json:"model"`
-	Provider       string `json:"provider,omitempty"`
-	Input          any    `json:"input"`
-	EncodingFormat string `json:"encoding_format,omitempty"`
-	Dimensions     *int   `json:"dimensions,omitempty"`
+	Model          string                     `json:"model"`
+	Provider       string                     `json:"provider,omitempty"`
+	Input          any                        `json:"input"`
+	EncodingFormat string                     `json:"encoding_format,omitempty"`
+	Dimensions     *int                       `json:"dimensions,omitempty"`
+	ExtraFields    map[string]json.RawMessage `json:"-" swaggerignore:"true"`
+}
+
+func (r *EmbeddingRequest) semanticSelector() (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	return r.Model, r.Provider
 }
 
 // EmbeddingResponse represents the embeddings response (OpenAI-compatible).

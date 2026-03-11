@@ -1,6 +1,8 @@
 package providers
 
 import (
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -35,6 +37,14 @@ func TestConvertResponsesRequestToChat(t *testing.T) {
 	temp := 0.7
 	maxTokens := 1024
 	includeUsage := true
+	mustResponsesRequest := func(data string) *core.ResponsesRequest {
+		t.Helper()
+		var req core.ResponsesRequest
+		if err := json.Unmarshal([]byte(data), &req); err != nil {
+			t.Fatalf("unmarshal responses request: %v", err)
+		}
+		return &req
+	}
 
 	tests := []struct {
 		name      string
@@ -220,6 +230,32 @@ func TestConvertResponsesRequestToChat(t *testing.T) {
 			},
 		},
 		{
+			name: "typed function call output stringifies structured output",
+			input: mustResponsesRequest(`{
+				"model":"test-model",
+				"input":[{
+					"type":"function_call_output",
+					"call_id":"call_456",
+					"output":{"temperature_c":21},
+					"x_meta":true
+				}]
+			}`),
+			checkFn: func(t *testing.T, req *core.ChatRequest) {
+				if len(req.Messages) != 1 {
+					t.Fatalf("len(Messages) = %d, want 1", len(req.Messages))
+				}
+				if req.Messages[0].Role != "tool" || req.Messages[0].ToolCallID != "call_456" {
+					t.Fatalf("unexpected tool result message: %+v", req.Messages[0])
+				}
+				if got := req.Messages[0].Content; got != `{"temperature_c":21}` {
+					t.Fatalf("Content = %#v, want serialized object", got)
+				}
+				if req.Messages[0].ExtraFields["x_meta"] == nil {
+					t.Fatalf("tool result extra missing: %+v", req.Messages[0].ExtraFields)
+				}
+			},
+		},
+		{
 			name: "assistant text merges with later function call item",
 			input: &core.ResponsesRequest{
 				Model: "test-model",
@@ -332,6 +368,222 @@ func TestConvertResponsesRequestToChat(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesRequestToChat_DoesNotMergeAssistantMessagesWithExtraFields(t *testing.T) {
+	req := &core.ResponsesRequest{
+		Model: "test-model",
+		Input: []core.ResponsesInputElement{
+			{
+				Type:        "message",
+				Role:        "assistant",
+				Content:     "first",
+				ExtraFields: map[string]json.RawMessage{"x_first": json.RawMessage(`true`)},
+			},
+			{
+				Type:        "message",
+				Role:        "assistant",
+				Content:     "second",
+				ExtraFields: map[string]json.RawMessage{"x_second": json.RawMessage(`true`)},
+			},
+		},
+	}
+
+	chatReq, err := ConvertResponsesRequestToChat(req)
+	if err != nil {
+		t.Fatalf("ConvertResponsesRequestToChat() error = %v", err)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("len(Messages) = %d, want 2", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].ExtraFields["x_first"] == nil {
+		t.Fatalf("first assistant extra missing: %+v", chatReq.Messages[0].ExtraFields)
+	}
+	if chatReq.Messages[1].ExtraFields["x_second"] == nil {
+		t.Fatalf("second assistant extra missing: %+v", chatReq.Messages[1].ExtraFields)
+	}
+}
+
+func TestConvertResponsesRequestToChat_RejectsWhitespaceOnlyMediaFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		input any
+	}{
+		{
+			name: "typed image url",
+			input: []core.ResponsesInputElement{
+				{
+					Type: "message",
+					Role: "user",
+					Content: []core.ContentPart{
+						{
+							Type:     "image_url",
+							ImageURL: &core.ImageURLContent{URL: "   "},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "map input audio",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "message",
+					"role": "user",
+					"content": []map[string]interface{}{
+						{
+							"type":        "input_audio",
+							"input_audio": map[string]interface{}{"data": "  ", "format": "wav"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ConvertResponsesRequestToChat(&core.ResponsesRequest{
+				Model: "test-model",
+				Input: tt.input,
+			})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "unsupported content") {
+				t.Fatalf("error = %v, want unsupported content", err)
+			}
+		})
+	}
+}
+
+func TestConvertResponsesRequestToChat_PreservesOpaqueExtras(t *testing.T) {
+	req := &core.ResponsesRequest{
+		Model: "test-model",
+		Input: []core.ResponsesInputElement{
+			{
+				Role: "user",
+				Content: []core.ContentPart{
+					{
+						Type: "input_text",
+						Text: "Describe this",
+						ExtraFields: map[string]json.RawMessage{
+							"cache_control": json.RawMessage(`{"type":"ephemeral"}`),
+						},
+					},
+				},
+				ExtraFields: map[string]json.RawMessage{
+					"x_message_hint": json.RawMessage(`true`),
+				},
+			},
+		},
+		ExtraFields: map[string]json.RawMessage{
+			"response_format": json.RawMessage(`{"type":"json_schema"}`),
+		},
+	}
+
+	chatReq, err := ConvertResponsesRequestToChat(req)
+	if err != nil {
+		t.Fatalf("ConvertResponsesRequestToChat() error = %v", err)
+	}
+
+	if chatReq.ExtraFields["response_format"] == nil {
+		t.Fatalf("response_format missing from chat request extras: %+v", chatReq.ExtraFields)
+	}
+	if len(chatReq.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].ExtraFields["x_message_hint"] == nil {
+		t.Fatalf("message extra missing after conversion: %+v", chatReq.Messages[0].ExtraFields)
+	}
+
+	parts, ok := chatReq.Messages[0].Content.([]core.ContentPart)
+	if !ok {
+		t.Fatalf("Messages[0].Content type = %T, want []core.ContentPart to preserve part extras", chatReq.Messages[0].Content)
+	}
+	if parts[0].ExtraFields["cache_control"] == nil {
+		t.Fatalf("content part extra missing after conversion: %+v", parts[0].ExtraFields)
+	}
+}
+
+func TestConvertResponsesRequestToChat_PreservesUnknownMapFields(t *testing.T) {
+	req := &core.ResponsesRequest{
+		Model: "test-model",
+		Input: []interface{}{
+			map[string]interface{}{
+				"type":      "function_call",
+				"call_id":   "call_123",
+				"name":      "lookup_weather",
+				"arguments": `{"city":"Warsaw"}`,
+				"x_trace":   map[string]interface{}{"attempt": 2},
+			},
+			map[string]interface{}{
+				"type":    "message",
+				"role":    "user",
+				"content": []map[string]interface{}{{"type": "output_text", "text": "hello", "cache_control": map[string]interface{}{"type": "ephemeral"}}},
+				"x_meta":  "keep-me",
+			},
+			map[string]interface{}{
+				"type": "message",
+				"role": "user",
+				"content": []interface{}{
+					map[string]interface{}{
+						"type": "input_image",
+						"image_url": map[string]string{
+							"url":        "https://example.com/image.png",
+							"detail":     "high",
+							"media_type": "image/png",
+							"x_nested":   "keep-image",
+						},
+					},
+					map[string]interface{}{
+						"type": "input_audio",
+						"input_audio": map[string]string{
+							"data":     "aGVsbG8=",
+							"format":   "wav",
+							"x_nested": "keep-audio",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	chatReq, err := ConvertResponsesRequestToChat(req)
+	if err != nil {
+		t.Fatalf("ConvertResponsesRequestToChat() error = %v", err)
+	}
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(chatReq.Messages))
+	}
+	if len(chatReq.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("len(Messages[0].ToolCalls) = %d, want 1", len(chatReq.Messages[0].ToolCalls))
+	}
+	if chatReq.Messages[0].ToolCalls[0].ExtraFields["x_trace"] == nil {
+		t.Fatalf("tool_call extra missing after conversion: %+v", chatReq.Messages[0].ToolCalls[0].ExtraFields)
+	}
+	if chatReq.Messages[1].ExtraFields["x_meta"] == nil {
+		t.Fatalf("message extra missing after map conversion: %+v", chatReq.Messages[1].ExtraFields)
+	}
+
+	parts, ok := chatReq.Messages[1].Content.([]core.ContentPart)
+	if !ok {
+		t.Fatalf("Messages[1].Content type = %T, want []core.ContentPart to preserve mapped text-part extras", chatReq.Messages[1].Content)
+	}
+	if parts[0].ExtraFields["cache_control"] == nil {
+		t.Fatalf("mapped content part extra missing after conversion: %+v", parts[0].ExtraFields)
+	}
+
+	multimodalParts, ok := chatReq.Messages[2].Content.([]core.ContentPart)
+	if !ok || len(multimodalParts) != 2 {
+		t.Fatalf("Messages[2].Content = %#v, want []core.ContentPart len=2", chatReq.Messages[2].Content)
+	}
+	if multimodalParts[0].ImageURL == nil || multimodalParts[0].ImageURL.ExtraFields["x_nested"] == nil {
+		t.Fatalf("image_url extra missing after map[string]string conversion: %+v", multimodalParts[0].ImageURL)
+	}
+	if multimodalParts[1].InputAudio == nil || multimodalParts[1].InputAudio.ExtraFields["x_nested"] == nil {
+		t.Fatalf("input_audio extra missing after map[string]string conversion: %+v", multimodalParts[1].InputAudio)
+	}
+}
+
 func TestConvertChatResponseToResponses(t *testing.T) {
 	resp := &core.ChatResponse{
 		ID:      "chatcmpl-123",
@@ -404,7 +656,21 @@ func TestConvertChatResponseToResponses_PreservesStructuredAssistantContent(t *t
 					Role: "assistant",
 					Content: []core.ContentPart{
 						{Type: "text", Text: "Here is the result."},
-						{Type: "image_url", ImageURL: &core.ImageURLContent{URL: "https://example.com/result.png"}},
+						{
+							Type: "image_url",
+							ImageURL: &core.ImageURLContent{
+								URL:         "https://example.com/result.png",
+								ExtraFields: map[string]json.RawMessage{"x_image": json.RawMessage(`true`)},
+							},
+						},
+						{
+							Type: "input_audio",
+							InputAudio: &core.InputAudioContent{
+								Data:        "YWJj",
+								Format:      "wav",
+								ExtraFields: map[string]json.RawMessage{"x_audio": json.RawMessage(`true`)},
+							},
+						},
 					},
 				},
 				FinishReason: "stop",
@@ -420,8 +686,8 @@ func TestConvertChatResponseToResponses_PreservesStructuredAssistantContent(t *t
 	if result.Output[0].Type != "message" {
 		t.Fatalf("Output[0].Type = %q, want message", result.Output[0].Type)
 	}
-	if len(result.Output[0].Content) != 2 {
-		t.Fatalf("len(Output[0].Content) = %d, want 2 structured content items", len(result.Output[0].Content))
+	if len(result.Output[0].Content) != 3 {
+		t.Fatalf("len(Output[0].Content) = %d, want 3 structured content items", len(result.Output[0].Content))
 	}
 	if result.Output[0].Content[0].Type != "output_text" || result.Output[0].Content[0].Text != "Here is the result." {
 		t.Fatalf("unexpected text content item: %+v", result.Output[0].Content[0])
@@ -431,6 +697,37 @@ func TestConvertChatResponseToResponses_PreservesStructuredAssistantContent(t *t
 	}
 	if result.Output[0].Content[1].ImageURL == nil || result.Output[0].Content[1].ImageURL.URL != "https://example.com/result.png" {
 		t.Fatalf("unexpected preserved image content item: %+v", result.Output[0].Content[1])
+	}
+	if result.Output[0].Content[1].ImageURL.ExtraFields["x_image"] == nil {
+		t.Fatalf("image extra missing after conversion: %+v", result.Output[0].Content[1].ImageURL)
+	}
+	if result.Output[0].Content[2].Type != "input_audio" {
+		t.Fatalf("expected preserved audio content item, got %+v", result.Output[0].Content[2])
+	}
+	if result.Output[0].Content[2].InputAudio == nil || result.Output[0].Content[2].InputAudio.Format != "wav" {
+		t.Fatalf("unexpected preserved audio content item: %+v", result.Output[0].Content[2])
+	}
+	if result.Output[0].Content[2].InputAudio.ExtraFields["x_audio"] == nil {
+		t.Fatalf("audio extra missing after conversion: %+v", result.Output[0].Content[2].InputAudio)
+	}
+}
+
+func TestConvertResponsesRequestToChat_RejectsNonSerializableFunctionCallOutputMap(t *testing.T) {
+	_, err := ConvertResponsesRequestToChat(&core.ResponsesRequest{
+		Model: "test-model",
+		Input: []interface{}{
+			map[string]interface{}{
+				"type":    "function_call_output",
+				"call_id": "call_123",
+				"output":  math.Inf(1),
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "function_call_output.output must be JSON-serializable") {
+		t.Fatalf("error = %v, want JSON-serializable validation error", err)
 	}
 }
 

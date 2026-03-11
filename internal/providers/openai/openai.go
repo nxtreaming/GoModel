@@ -3,6 +3,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -97,52 +98,47 @@ func isOSeriesModel(model string) bool {
 	return len(m) >= 2 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'
 }
 
-// oSeriesChatRequest is the JSON body sent to OpenAI for o-series models.
-// It uses max_completion_tokens (required) instead of max_tokens (rejected).
-type oSeriesChatRequest struct {
-	Model               string              `json:"model"`
-	Messages            []core.Message      `json:"messages"`
-	Tools               []map[string]any    `json:"tools,omitempty"`
-	ToolChoice          any                 `json:"tool_choice,omitempty"`
-	ParallelToolCalls   *bool               `json:"parallel_tool_calls,omitempty"`
-	Stream              bool                `json:"stream,omitempty"`
-	StreamOptions       *core.StreamOptions `json:"stream_options,omitempty"`
-	Reasoning           *core.Reasoning     `json:"reasoning,omitempty"`
-	MaxCompletionTokens *int                `json:"max_completion_tokens,omitempty"`
-}
-
-// adaptForOSeries converts a ChatRequest into an oSeriesChatRequest,
-// mapping max_tokens → max_completion_tokens and dropping temperature.
-func adaptForOSeries(req *core.ChatRequest) *oSeriesChatRequest {
-	return &oSeriesChatRequest{
-		Model:               req.Model,
-		Messages:            req.Messages,
-		Tools:               req.Tools,
-		ToolChoice:          req.ToolChoice,
-		ParallelToolCalls:   req.ParallelToolCalls,
-		Stream:              req.Stream,
-		StreamOptions:       req.StreamOptions,
-		Reasoning:           req.Reasoning,
-		MaxCompletionTokens: req.MaxTokens,
+// adaptForOSeries rewrites a ChatRequest body for OpenAI o-series models,
+// mapping max_tokens -> max_completion_tokens and dropping temperature while
+// preserving all unknown top-level JSON fields.
+func adaptForOSeries(req *core.ChatRequest) (any, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, core.NewInvalidRequestError("failed to marshal o-series request: "+err.Error(), err)
 	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, core.NewInvalidRequestError("failed to decode o-series request payload: "+err.Error(), err)
+	}
+	if maxTokens, ok := raw["max_tokens"]; ok {
+		raw["max_completion_tokens"] = maxTokens
+		delete(raw, "max_tokens")
+	}
+	delete(raw, "temperature")
+	return raw, nil
 }
 
 // chatRequestBody returns the appropriate request body for the model.
 // Reasoning models get parameter adaptation; others pass through as-is.
-func chatRequestBody(req *core.ChatRequest) any {
+func chatRequestBody(req *core.ChatRequest) (any, error) {
 	if isOSeriesModel(req.Model) {
 		return adaptForOSeries(req)
 	}
-	return req
+	return req, nil
 }
 
 // ChatCompletion sends a chat completion request to OpenAI
 func (p *Provider) ChatCompletion(ctx context.Context, req *core.ChatRequest) (*core.ChatResponse, error) {
 	var resp core.ChatResponse
-	err := p.client.Do(ctx, llmclient.Request{
+	body, err := chatRequestBody(req)
+	if err != nil {
+		return nil, err
+	}
+	err = p.client.Do(ctx, llmclient.Request{
 		Method:   http.MethodPost,
 		Endpoint: "/chat/completions",
-		Body:     chatRequestBody(req),
+		Body:     body,
 	}, &resp)
 	if err != nil {
 		return nil, err
@@ -160,10 +156,14 @@ func (p *Provider) ChatCompletion(ctx context.Context, req *core.ChatRequest) (*
 // this provider forwards the upstream SSE stream unchanged for API parity.
 func (p *Provider) StreamChatCompletion(ctx context.Context, req *core.ChatRequest) (io.ReadCloser, error) {
 	streamReq := req.WithStreaming()
+	body, err := chatRequestBody(streamReq)
+	if err != nil {
+		return nil, err
+	}
 	return p.client.DoStream(ctx, llmclient.Request{
 		Method:   http.MethodPost,
 		Endpoint: "/chat/completions",
-		Body:     chatRequestBody(streamReq),
+		Body:     body,
 	})
 }
 
@@ -230,6 +230,29 @@ func (p *Provider) Embeddings(ctx context.Context, req *core.EmbeddingRequest) (
 		resp.Model = req.Model
 	}
 	return &resp, nil
+}
+
+// Passthrough forwards an opaque OpenAI-native request without typed translation.
+func (p *Provider) Passthrough(ctx context.Context, req *core.PassthroughRequest) (*core.PassthroughResponse, error) {
+	if req == nil {
+		return nil, core.NewInvalidRequestError("passthrough request is required", nil)
+	}
+
+	resp, err := p.client.DoPassthrough(ctx, llmclient.Request{
+		Method:        req.Method,
+		Endpoint:      providers.PassthroughEndpoint(req.Endpoint),
+		RawBodyReader: req.Body,
+		Headers:       req.Headers,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &core.PassthroughResponse{
+		StatusCode: resp.StatusCode,
+		Headers:    providers.CloneHTTPHeaders(resp.Header),
+		Body:       resp.Body,
+	}, nil
 }
 
 // CreateBatch creates a native OpenAI batch job.

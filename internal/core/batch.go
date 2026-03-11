@@ -13,19 +13,58 @@ import "encoding/json"
 // Gateway extension:
 //   - requests (inline payloads for providers that support native inline batch bodies)
 type BatchRequest struct {
-	InputFileID      string             `json:"input_file_id,omitempty"`
-	Endpoint         string             `json:"endpoint,omitempty"`
-	CompletionWindow string             `json:"completion_window,omitempty"`
-	Metadata         map[string]string  `json:"metadata,omitempty"`
-	Requests         []BatchRequestItem `json:"requests,omitempty"`
+	InputFileID      string                     `json:"input_file_id,omitempty"`
+	Endpoint         string                     `json:"endpoint,omitempty"`
+	CompletionWindow string                     `json:"completion_window,omitempty"`
+	Metadata         map[string]string          `json:"metadata,omitempty"`
+	Requests         []BatchRequestItem         `json:"requests,omitempty"`
+	ExtraFields      map[string]json.RawMessage `json:"-" swaggerignore:"true"`
+}
+
+const (
+	// BatchActionCreate represents POST /v1/batches.
+	BatchActionCreate = "create"
+	// BatchActionList represents GET /v1/batches.
+	BatchActionList = "list"
+	// BatchActionGet represents GET /v1/batches/{id}.
+	BatchActionGet = "get"
+	// BatchActionCancel represents POST /v1/batches/{id}/cancel.
+	BatchActionCancel = "cancel"
+	// BatchActionResults represents GET /v1/batches/{id}/results.
+	BatchActionResults = "results"
+)
+
+// BatchRequestSemantic is the sparse canonical metadata the gateway can derive for /v1/batches* routes.
+// The full create payload remains in BatchRequest when the gateway lazily decodes JSON bodies.
+type BatchRequestSemantic struct {
+	Action   string
+	BatchID  string
+	After    string
+	LimitRaw string
+	Limit    int
+	HasLimit bool
+}
+
+func (req *BatchRequestSemantic) ensureParsedLimit() error {
+	if req == nil || req.LimitRaw == "" || req.HasLimit {
+		return nil
+	}
+	parsed, err := parseRouteLimit(req.LimitRaw)
+	if err != nil {
+		return err
+	}
+	req.Limit = parsed
+	req.HasLimit = true
+	return nil
 }
 
 // BatchRequestItem represents one sub-request in an inline batch.
 type BatchRequestItem struct {
-	CustomID string          `json:"custom_id,omitempty"`
-	Method   string          `json:"method,omitempty"`
-	URL      string          `json:"url"`
-	Body     json.RawMessage `json:"body" swaggertype:"object"`
+	CustomID    string                     `json:"custom_id,omitempty"`
+	Method      string                     `json:"method,omitempty"`
+	URL         string                     `json:"url"`
+	Body        json.RawMessage            `json:"body" swaggertype:"object"`
+	ExtraFields map[string]json.RawMessage `json:"-" swaggerignore:"true"`
 }
 
 // BatchResponse uses OpenAI-compatible batch fields and includes provider mapping plus optional cached results.

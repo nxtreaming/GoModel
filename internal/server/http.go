@@ -7,7 +7,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -33,21 +32,24 @@ type Server struct {
 
 // Config holds server configuration options
 type Config struct {
-	MasterKey                string                   // Optional: Master key for authentication
-	MetricsEnabled           bool                     // Whether to expose Prometheus metrics endpoint
-	MetricsEndpoint          string                   // HTTP path for metrics endpoint (default: /metrics)
-	BodySizeLimit            string                   // Max request body size (e.g., "10M", "1024K")
-	AuditLogger              auditlog.LoggerInterface // Optional: Audit logger for request/response logging
-	UsageLogger              usage.LoggerInterface    // Optional: Usage logger for token tracking
-	PricingResolver          usage.PricingResolver    // Optional: Resolves pricing for cost calculation
-	BatchStore               batchstore.Store         // Optional: Batch lifecycle persistence store
-	LogOnlyModelInteractions bool                     // Only log AI model endpoints (default: true)
-	AdminEndpointsEnabled    bool                     // Whether admin API endpoints are enabled
-	AdminUIEnabled           bool                     // Whether admin dashboard UI is enabled
-	AdminHandler             *admin.Handler           // Admin API handler (nil if disabled)
-	DashboardHandler         *dashboard.Handler       // Dashboard UI handler (nil if disabled)
-	SwaggerEnabled           bool                     // Whether to expose the Swagger UI at /swagger/index.html
-	ResponseCacheMiddleware  *responsecache.ResponseCacheMiddleware // Optional: response cache middleware for cacheable endpoints
+	MasterKey                              string                                 // Optional: Master key for authentication
+	MetricsEnabled                         bool                                   // Whether to expose Prometheus metrics endpoint
+	MetricsEndpoint                        string                                 // HTTP path for metrics endpoint (default: /metrics)
+	BodySizeLimit                          string                                 // Max request body size (e.g., "10M", "1024K")
+	AuditLogger                            auditlog.LoggerInterface               // Optional: Audit logger for request/response logging
+	UsageLogger                            usage.LoggerInterface                  // Optional: Usage logger for token tracking
+	PricingResolver                        usage.PricingResolver                  // Optional: Resolves pricing for cost calculation
+	BatchStore                             batchstore.Store                       // Optional: Batch lifecycle persistence store
+	LogOnlyModelInteractions               bool                                   // Only log AI model endpoints (default: true)
+	DisableProviderPassthrough             bool                                   // Disable /p/{provider}/{endpoint} route registration
+	SupportedPassthroughProviders          []string                               // Provider types allowed on /p/{provider}/... passthrough routes
+	EnablePassthroughV1PrefixNormalization *bool                                  // Enable /p/{provider}/v1/... normalization while keeping /p/{provider}/... as canonical; nil defaults to true
+	AdminEndpointsEnabled                  bool                                   // Whether admin API endpoints are enabled
+	AdminUIEnabled                         bool                                   // Whether admin dashboard UI is enabled
+	AdminHandler                           *admin.Handler                         // Admin API handler (nil if disabled)
+	DashboardHandler                       *dashboard.Handler                     // Dashboard UI handler (nil if disabled)
+	SwaggerEnabled                         bool                                   // Whether to expose the Swagger UI at /swagger/index.html
+	ResponseCacheMiddleware                *responsecache.ResponseCacheMiddleware // Optional: response cache middleware for cacheable endpoints
 }
 
 // New creates a new HTTP server
@@ -66,6 +68,12 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	}
 
 	handler := NewHandler(provider, auditLogger, usageLogger, pricingResolver)
+	if cfg != nil && cfg.SupportedPassthroughProviders != nil {
+		handler.setSupportedPassthroughProviders(cfg.SupportedPassthroughProviders)
+	}
+	if cfg != nil && !passthroughV1PrefixNormalizationEnabled(cfg) {
+		handler.normalizePassthroughV1Prefix = false
+	}
 	if cfg != nil && cfg.BatchStore != nil {
 		handler.SetBatchStore(cfg.BatchStore)
 	}
@@ -81,7 +89,8 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 			metricsPath = path.Clean(cfg.MetricsEndpoint)
 		}
 		// Prevent metrics endpoint from shadowing API routes (security: auth bypass)
-		if metricsPath == "/v1" || strings.HasPrefix(metricsPath, "/v1/") {
+		if metricsPath == "/v1" || strings.HasPrefix(metricsPath, "/v1/") ||
+			metricsPath == "/p" || strings.HasPrefix(metricsPath, "/p/") {
 			slog.Warn("metrics endpoint conflicts with API routes, using /metrics instead",
 				"configured", cfg.MetricsEndpoint,
 				"normalized", metricsPath)
@@ -149,15 +158,15 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	// for usage tracking, audit logging, and response correlation)
 	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			id := c.Request().Header.Get("X-Request-ID")
-			if id == "" {
-				id = uuid.NewString()
-				c.Request().Header.Set("X-Request-ID", id)
-			}
+			req, id := ensureRequestID(c.Request())
+			c.SetRequest(req)
 			c.Response().Header().Set("X-Request-ID", id)
 			return next(c)
 		}
 	})
+
+	// Ingress capture (before auth/audit/model validation so they can consume shared raw request state)
+	e.Use(IngressCapture())
 
 	// Audit logging middleware (before authentication to capture all requests)
 	if cfg != nil && cfg.AuditLogger != nil && cfg.AuditLogger.Config().Enabled {
@@ -186,6 +195,15 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 	}
 
 	// API routes
+	if cfg == nil || !cfg.DisableProviderPassthrough {
+		e.GET("/p/:provider/*", handler.ProviderPassthrough)
+		e.POST("/p/:provider/*", handler.ProviderPassthrough)
+		e.PUT("/p/:provider/*", handler.ProviderPassthrough)
+		e.PATCH("/p/:provider/*", handler.ProviderPassthrough)
+		e.DELETE("/p/:provider/*", handler.ProviderPassthrough)
+		e.HEAD("/p/:provider/*", handler.ProviderPassthrough)
+		e.OPTIONS("/p/:provider/*", handler.ProviderPassthrough)
+	}
 	e.GET("/v1/models", handler.ListModels)
 	e.POST("/v1/chat/completions", handler.ChatCompletion)
 	e.POST("/v1/responses", handler.Responses)
@@ -230,6 +248,13 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 		handler:                 handler,
 		responseCacheMiddleware: rcm,
 	}
+}
+
+func passthroughV1PrefixNormalizationEnabled(cfg *Config) bool {
+	if cfg == nil || cfg.EnablePassthroughV1PrefixNormalization == nil {
+		return true
+	}
+	return *cfg.EnablePassthroughV1PrefixNormalization
 }
 
 // Start starts the HTTP server on the given address and exits when ctx is canceled.

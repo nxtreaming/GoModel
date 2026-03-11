@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,25 @@ import (
 
 	"gomodel/internal/core"
 )
+
+type explodingValidationReadCloser struct{}
+
+type modelCountingValidationProvider struct {
+	*mockProvider
+	modelCount int
+}
+
+func (explodingValidationReadCloser) Read([]byte) (int, error) {
+	return 0, errors.New("live request body should not be read")
+}
+
+func (explodingValidationReadCloser) Close() error {
+	return nil
+}
+
+func (p *modelCountingValidationProvider) ModelCount() int {
+	return p.modelCount
+}
 
 func TestModelValidation(t *testing.T) {
 	provider := &mockProvider{supportedModels: []string{"gpt-4o-mini", "text-embedding-3-small"}}
@@ -280,6 +300,259 @@ func TestModelValidation_BodyRewound(t *testing.T) {
 
 	assert.Equal(t, "gpt-4o-mini", boundReq.Model)
 	assert.Len(t, boundReq.Messages, 1)
+}
+
+func TestModelValidation_DoesNotReadLiveBodyWhenSelectorHintsAlreadyExist(t *testing.T) {
+	provider := &mockProvider{supportedModels: []string{"gpt-4o-mini"}}
+
+	e := echo.New()
+	handlerCalled := false
+
+	middleware := ModelValidation(provider)
+	handler := middleware(func(c *echo.Context) error {
+		handlerCalled = true
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = explodingValidationReadCloser{}
+
+	frame := core.NewIngressFrame(http.MethodPost, "/v1/chat/completions", nil, nil, nil, "application/json", nil, false, "", nil)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, &core.SemanticEnvelope{
+		Dialect:        "openai_compat",
+		Operation:      "chat_completions",
+		JSONBodyParsed: true,
+		SelectorHints: core.SelectorHints{
+			Model: "gpt-4o-mini",
+		},
+	})
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	assert.True(t, handlerCalled)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestModelValidation_UsesIngressBodyForMissingSelectorHints(t *testing.T) {
+	provider := &mockProvider{supportedModels: []string{"gpt-4o-mini"}}
+
+	e := echo.New()
+	handlerCalled := false
+
+	middleware := ModelValidation(provider)
+	handler := middleware(func(c *echo.Context) error {
+		handlerCalled = true
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = explodingValidationReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/chat/completions",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	assert.True(t, handlerCalled)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestModelValidation_RegistryNotInitializedReturnsGatewayError(t *testing.T) {
+	provider := &modelCountingValidationProvider{
+		mockProvider: &mockProvider{supportedModels: []string{"gpt-4o-mini"}},
+		modelCount:   0,
+	}
+
+	e := echo.New()
+	handlerCalled := false
+
+	middleware := ModelValidation(provider)
+	handler := middleware(func(c *echo.Context) error {
+		handlerCalled = true
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+
+	assert.False(t, handlerCalled)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Contains(t, rec.Body.String(), "model registry not initialized")
+}
+
+func TestModelValidation_ResolvesProviderTypeFromOversizedLiveBody(t *testing.T) {
+	provider := &mockProvider{
+		supportedModels: []string{"gpt-4o-mini"},
+		providerTypes: map[string]string{
+			"openai/gpt-4o-mini": "openai",
+		},
+	}
+
+	e := echo.New()
+	var capturedEnv *core.SemanticEnvelope
+	var capturedProviderType string
+
+	middleware := ModelValidation(provider)
+	handler := middleware(func(c *echo.Context) error {
+		capturedEnv = core.GetSemanticEnvelope(c.Request().Context())
+		capturedProviderType = GetProviderType(c)
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
+		"provider":"openai",
+		"model":"gpt-4o-mini",
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "oversized-live-body")
+
+	frame := core.NewIngressFrame(http.MethodPost, "/v1/chat/completions", nil, nil, nil, "application/json", nil, true, "", nil)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	require.NotNil(t, capturedEnv)
+	assert.Equal(t, "openai", capturedProviderType)
+	canonicalReq := capturedEnv.CachedChatRequest()
+	require.NotNil(t, canonicalReq)
+	assert.Equal(t, "gpt-4o-mini", canonicalReq.Model)
+	assert.Equal(t, "openai", canonicalReq.Provider)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestModelValidation_CachesCanonicalChatRequestFromIngressBody(t *testing.T) {
+	provider := &mockProvider{supportedModels: []string{"gpt-4o-mini"}}
+
+	e := echo.New()
+	var capturedEnv *core.SemanticEnvelope
+
+	middleware := ModelValidation(provider)
+	handler := middleware(func(c *echo.Context) error {
+		capturedEnv = core.GetSemanticEnvelope(c.Request().Context())
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = explodingValidationReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/chat/completions",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"model":"gpt-4o-mini",
+			"provider":"openai",
+			"messages":[{"role":"user","content":"hi"}],
+			"response_format":{"type":"json_schema"}
+		}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	require.NotNil(t, capturedEnv)
+	canonicalReq := capturedEnv.CachedChatRequest()
+	require.NotNil(t, canonicalReq)
+	assert.Equal(t, "gpt-4o-mini", canonicalReq.Model)
+	assert.Equal(t, "openai", canonicalReq.Provider)
+	assert.NotNil(t, canonicalReq.ExtraFields["response_format"])
+}
+
+func TestModelValidation_CachesCanonicalResponsesRequestFromIngressBody(t *testing.T) {
+	provider := &mockProvider{supportedModels: []string{"gpt-4o-mini"}}
+
+	e := echo.New()
+	var capturedEnv *core.SemanticEnvelope
+
+	middleware := ModelValidation(provider)
+	handler := middleware(func(c *echo.Context) error {
+		capturedEnv = core.GetSemanticEnvelope(c.Request().Context())
+		return c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = explodingValidationReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/responses",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"model":"gpt-4o-mini",
+			"input":[{"type":"message","role":"user","content":"hi","x_trace":{"id":"trace-1"}}]
+		}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler(c)
+	require.NoError(t, err)
+	require.NotNil(t, capturedEnv)
+	canonicalReq := capturedEnv.CachedResponsesRequest()
+	require.NotNil(t, canonicalReq)
+
+	input, ok := canonicalReq.Input.([]core.ResponsesInputElement)
+	require.True(t, ok)
+	require.Len(t, input, 1)
+	assert.NotNil(t, input[0].ExtraFields["x_trace"])
 }
 
 func TestModelCtx_ReturnsContextAndProviderType(t *testing.T) {

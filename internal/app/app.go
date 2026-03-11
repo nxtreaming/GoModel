@@ -157,17 +157,21 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 
 	// Create server
+	enablePassthroughV1PrefixNormalization := appCfg.Server.NormalizePassthroughV1Prefix
 	serverCfg := &server.Config{
-		MasterKey:                appCfg.Server.MasterKey,
-		MetricsEnabled:           appCfg.Metrics.Enabled,
-		MetricsEndpoint:          appCfg.Metrics.Endpoint,
-		BodySizeLimit:            appCfg.Server.BodySizeLimit,
-		AuditLogger:              auditResult.Logger,
-		UsageLogger:              usageResult.Logger,
-		PricingResolver:          providerResult.Registry,
-		BatchStore:               batchResult.Store,
-		LogOnlyModelInteractions: appCfg.Logging.OnlyModelInteractions,
-		SwaggerEnabled:           appCfg.Server.SwaggerEnabled,
+		MasterKey:                              appCfg.Server.MasterKey,
+		MetricsEnabled:                         appCfg.Metrics.Enabled,
+		MetricsEndpoint:                        appCfg.Metrics.Endpoint,
+		BodySizeLimit:                          appCfg.Server.BodySizeLimit,
+		AuditLogger:                            auditResult.Logger,
+		UsageLogger:                            usageResult.Logger,
+		PricingResolver:                        providerResult.Registry,
+		BatchStore:                             batchResult.Store,
+		LogOnlyModelInteractions:               appCfg.Logging.OnlyModelInteractions,
+		DisableProviderPassthrough:             !appCfg.Server.EnableProviderPassthrough,
+		SupportedPassthroughProviders:          appCfg.Server.SupportedPassthroughProviders,
+		EnablePassthroughV1PrefixNormalization: &enablePassthroughV1PrefixNormalization,
+		SwaggerEnabled:                         appCfg.Server.SwaggerEnabled,
 	}
 
 	// Initialize admin API and dashboard (behind separate feature flags)
@@ -196,6 +200,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 
 	if appCfg.Server.SwaggerEnabled {
 		slog.Info("swagger UI enabled", "path", "/swagger/index.html")
+	}
+	if appCfg.Server.EnableProviderPassthrough {
+		slog.Info("provider passthrough enabled", "path", "/p/{provider}/{endpoint}")
+	} else {
+		slog.Info("provider passthrough disabled")
 	}
 
 	rcm, err := responsecache.NewResponseCacheMiddleware(appCfg.Cache.Response)

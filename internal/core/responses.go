@@ -1,23 +1,37 @@
 package core
 
+import "encoding/json"
+
 // ResponsesRequest represents the request body for the Responses API.
-// This is the OpenAI-compatible /v1/responses endpoint.
+// This is the OpenAI-compatible /v1/responses endpoint. Unknown JSON members
+// encountered during unmarshaling are preserved in ExtraFields
+// (map[string]json.RawMessage) and emitted again during marshaling so callers
+// can round-trip extensions; Swagger ignores ExtraFields, and typed fields
+// should be preferred when available.
 type ResponsesRequest struct {
 	Model    string      `json:"model"`
 	Provider string      `json:"provider,omitempty"`
 	Input    interface{} `json:"input"` // string or []ResponsesInputElement — see docs for array form
 	//nolint:govet // Intentional duplicate json tag for Swagger docs: input is string OR []ResponsesInputElement.
-	InputSchema       []ResponsesInputElement `json:"input,omitempty" extensions:"x-oneOf=[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/core.ResponsesInputElement\"}}]"`
-	Instructions      string                  `json:"instructions,omitempty"`
-	Tools             []map[string]any        `json:"tools,omitempty"`
-	ToolChoice        any                     `json:"tool_choice,omitempty"` // string or object
-	ParallelToolCalls *bool                   `json:"parallel_tool_calls,omitempty"`
-	Temperature       *float64                `json:"temperature,omitempty"`
-	MaxOutputTokens   *int                    `json:"max_output_tokens,omitempty"`
-	Stream            bool                    `json:"stream,omitempty"`
-	StreamOptions     *StreamOptions          `json:"stream_options,omitempty"`
-	Metadata          map[string]string       `json:"metadata,omitempty"`
-	Reasoning         *Reasoning              `json:"reasoning,omitempty"`
+	InputSchema       []ResponsesInputElement    `json:"input,omitempty" extensions:"x-oneOf=[{\"type\":\"string\"},{\"type\":\"array\",\"items\":{\"$ref\":\"#/definitions/core.ResponsesInputElement\"}}]"`
+	Instructions      string                     `json:"instructions,omitempty"`
+	Tools             []map[string]any           `json:"tools,omitempty"`
+	ToolChoice        any                        `json:"tool_choice,omitempty"` // string or object
+	ParallelToolCalls *bool                      `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64                   `json:"temperature,omitempty"`
+	MaxOutputTokens   *int                       `json:"max_output_tokens,omitempty"`
+	Stream            bool                       `json:"stream,omitempty"`
+	StreamOptions     *StreamOptions             `json:"stream_options,omitempty"`
+	Metadata          map[string]string          `json:"metadata,omitempty"`
+	Reasoning         *Reasoning                 `json:"reasoning,omitempty"`
+	ExtraFields       map[string]json.RawMessage `json:"-" swaggerignore:"true"`
+}
+
+func (r *ResponsesRequest) semanticSelector() (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	return r.Model, r.Provider
 }
 
 // WithStreaming returns a shallow copy of the request with Stream set to true.
@@ -33,6 +47,11 @@ func (r *ResponsesRequest) WithStreaming() *ResponsesRequest {
 //   - "" or "message": a chat-style message with Role and Content
 //   - "function_call": a tool invocation with CallID, Name, and Arguments
 //   - "function_call_output": a tool result with CallID and Output
+//
+// Unknown JSON members encountered during unmarshaling are preserved in
+// ExtraFields (map[string]json.RawMessage) and marshaled back out unchanged so
+// extensions can round-trip; Swagger ignores ExtraFields, and typed fields
+// should be preferred when available.
 type ResponsesInputElement struct {
 	Type string `json:"type,omitempty"` // "message", "function_call", "function_call_output"
 
@@ -49,7 +68,8 @@ type ResponsesInputElement struct {
 	Arguments string `json:"arguments,omitempty"`
 
 	// Function call output fields (type="function_call_output") — CallID shared above
-	Output string `json:"output,omitempty"`
+	Output      string                     `json:"output,omitempty"`
+	ExtraFields map[string]json.RawMessage `json:"-" swaggerignore:"true"`
 }
 
 // ResponsesResponse represents the response from the Responses API.

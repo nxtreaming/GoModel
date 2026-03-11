@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"gomodel/internal/auditlog"
 	"gomodel/internal/core"
@@ -167,6 +169,7 @@ type mockProvider struct {
 	batchResults        *core.BatchResultsResponse
 	batchResultsErr     error
 	batchErr            error
+	capturedBatchReq    *core.BatchRequest
 
 	fileCreateResponse  *core.FileObject
 	fileGetResponse     *core.FileObject
@@ -178,6 +181,26 @@ type mockProvider struct {
 	fileErrByProvider   map[string]error
 	fileGetByProvider   map[string]*core.FileObject
 	fileContentByProv   map[string]*core.FileContentResponse
+
+	passthroughResponse     *core.PassthroughResponse
+	passthroughErr          error
+	lastPassthroughProvider string
+	lastPassthroughReq      *core.PassthroughRequest
+}
+
+func readPassthroughRequestBody(t *testing.T, body io.ReadCloser) string {
+	t.Helper()
+	if body == nil {
+		return ""
+	}
+	defer func() {
+		_ = body.Close()
+	}()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("failed to read passthrough request body: %v", err)
+	}
+	return string(data)
 }
 
 func (m *mockProvider) Supports(model string) bool {
@@ -260,7 +283,17 @@ func (m *mockProvider) Embeddings(_ context.Context, _ *core.EmbeddingRequest) (
 	return m.embeddingResponse, nil
 }
 
-func (m *mockProvider) CreateBatch(_ context.Context, _ string, _ *core.BatchRequest) (*core.BatchResponse, error) {
+func (m *mockProvider) Passthrough(_ context.Context, providerType string, req *core.PassthroughRequest) (*core.PassthroughResponse, error) {
+	m.lastPassthroughProvider = providerType
+	m.lastPassthroughReq = req
+	if m.passthroughErr != nil {
+		return nil, m.passthroughErr
+	}
+	return m.passthroughResponse, nil
+}
+
+func (m *mockProvider) CreateBatch(_ context.Context, _ string, req *core.BatchRequest) (*core.BatchResponse, error) {
+	m.capturedBatchReq = req
 	if m.batchErr != nil {
 		return nil, m.batchErr
 	}
@@ -550,6 +583,605 @@ func TestChatCompletion_BindsMultimodalContent(t *testing.T) {
 	}
 }
 
+func TestChatCompletion_PreservesUnknownTopLevelFields(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"gpt-5-mini"},
+			response: &core.ChatResponse{
+				ID:      "chatcmpl-123",
+				Object:  "chat.completion",
+				Created: 1234567890,
+				Model:   "gpt-5-mini",
+				Choices: []core.Choice{
+					{
+						Index:        0,
+						Message:      core.ResponseMessage{Role: "assistant", Content: "ok"},
+						FinishReason: "stop",
+					},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	reqBody := `{
+		"model":"gpt-5-mini",
+		"messages":[{"role":"user","content":"return json"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"math_response",
+				"schema":{"type":"object","properties":{"answer":{"type":"string"}}}
+			}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := handler.ChatCompletion(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if provider.capturedChatReq == nil {
+		t.Fatal("expected chat request to be captured")
+	}
+	if provider.capturedChatReq.ExtraFields["response_format"] == nil {
+		t.Fatalf("response_format missing from ExtraFields: %+v", provider.capturedChatReq.ExtraFields)
+	}
+
+	body, err := json.Marshal(provider.capturedChatReq)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"response_format"`)) {
+		t.Fatalf("marshaled request missing response_format: %s", string(body))
+	}
+}
+
+func TestChatCompletion_PreservesUnknownNestedFields(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"gpt-5-mini"},
+			response: &core.ChatResponse{
+				ID:      "chatcmpl-123",
+				Object:  "chat.completion",
+				Created: 1234567890,
+				Model:   "gpt-5-mini",
+				Choices: []core.Choice{
+					{
+						Index:        0,
+						Message:      core.ResponseMessage{Role: "assistant", Content: "ok"},
+						FinishReason: "stop",
+					},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	reqBody := `{
+		"model":"gpt-5-mini",
+		"messages":[
+			{
+				"role":"user",
+				"name":"alice",
+				"content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]
+			}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := handler.ChatCompletion(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if provider.capturedChatReq == nil {
+		t.Fatal("expected chat request to be captured")
+	}
+	if provider.capturedChatReq.Messages[0].ExtraFields["name"] == nil {
+		t.Fatalf("message.name missing from ExtraFields: %+v", provider.capturedChatReq.Messages[0].ExtraFields)
+	}
+
+	body, err := json.Marshal(provider.capturedChatReq)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	messages := decoded["messages"].([]any)
+	firstMsg := messages[0].(map[string]any)
+	if firstMsg["name"] != "alice" {
+		t.Fatalf("messages[0].name = %#v, want alice", firstMsg["name"])
+	}
+	content := firstMsg["content"].([]any)
+	firstPart := content[0].(map[string]any)
+	if _, ok := firstPart["cache_control"].(map[string]any); !ok {
+		t.Fatalf("messages[0].content[0].cache_control = %#v, want object", firstPart["cache_control"])
+	}
+}
+
+func TestChatCompletion_UsesIngressFrameForDecoding(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"gpt-5-mini"},
+			response: &core.ChatResponse{
+				ID:      "chatcmpl-123",
+				Object:  "chat.completion",
+				Created: 1234567890,
+				Model:   "gpt-5-mini",
+				Choices: []core.Choice{
+					{
+						Index:        0,
+						Message:      core.ResponseMessage{Role: "assistant", Content: "ok"},
+						FinishReason: "stop",
+					},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-ingress-1")
+	req.Body = &explodingReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/chat/completions",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"model":"gpt-5-mini",
+			"messages":[{"role":"user","content":"return json"}],
+			"response_format":{"type":"json_schema"}
+		}`),
+		false,
+		"req-ingress-1",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler.ChatCompletion(c)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if provider.capturedChatReq == nil {
+		t.Fatal("expected chat request to be captured")
+	}
+	if provider.capturedChatReq.ExtraFields["response_format"] == nil {
+		t.Fatalf("response_format missing from ExtraFields: %+v", provider.capturedChatReq.ExtraFields)
+	}
+
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedChatRequest() == nil {
+		t.Fatalf("expected semantic envelope to cache ChatRequest, got %+v", env)
+	}
+	if env.CachedChatRequest() != provider.capturedChatReq {
+		t.Fatal("cached ChatRequest does not match provider request")
+	}
+}
+
+func TestChatCompletion_NormalizesSemanticSelectorHints(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"gpt-5-mini"},
+			response: &core.ChatResponse{
+				ID:     "chatcmpl_123",
+				Object: "chat.completion",
+				Model:  "gpt-5-mini",
+				Choices: []core.Choice{
+					{
+						Index:        0,
+						FinishReason: "stop",
+						Message: core.ResponseMessage{
+							Role:    "assistant",
+							Content: "ok",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = &explodingReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/chat/completions",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"model":"openai/gpt-5-mini",
+			"messages":[{"role":"user","content":"return json"}]
+		}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler.ChatCompletion(c)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if provider.capturedChatReq == nil {
+		t.Fatal("expected chat request to be captured")
+	}
+	if provider.capturedChatReq.Model != "gpt-5-mini" {
+		t.Fatalf("captured model = %q, want gpt-5-mini", provider.capturedChatReq.Model)
+	}
+	if provider.capturedChatReq.Provider != "openai" {
+		t.Fatalf("captured provider = %q, want openai", provider.capturedChatReq.Provider)
+	}
+
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedChatRequest() == nil {
+		t.Fatalf("expected semantic envelope to cache ChatRequest, got %+v", env)
+	}
+	if env.SelectorHints.Model != "gpt-5-mini" {
+		t.Fatalf("SelectorHints.Model = %q, want gpt-5-mini", env.SelectorHints.Model)
+	}
+	if env.SelectorHints.Provider != "openai" {
+		t.Fatalf("SelectorHints.Provider = %q, want openai", env.SelectorHints.Provider)
+	}
+}
+
+func TestResponses_UsesIngressFrameForDecoding(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"gpt-5-mini"},
+			responsesResponse: &core.ResponsesResponse{
+				ID:        "resp_123",
+				Object:    "response",
+				CreatedAt: 1234567890,
+				Model:     "gpt-5-mini",
+				Status:    "completed",
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = &explodingReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/responses",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"model":"gpt-5-mini",
+			"input":[{"type":"message","role":"user","content":"hello","x_trace":{"id":"trace-1"}}]
+		}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := handler.Responses(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if provider.capturedResponsesReq == nil {
+		t.Fatal("expected responses request to be captured")
+	}
+	input, ok := provider.capturedResponsesReq.Input.([]core.ResponsesInputElement)
+	if !ok || len(input) != 1 {
+		t.Fatalf("captured input = %#v, want []ResponsesInputElement len=1", provider.capturedResponsesReq.Input)
+	}
+	if input[0].ExtraFields["x_trace"] == nil {
+		t.Fatalf("input[0].x_trace missing from ExtraFields: %+v", input[0].ExtraFields)
+	}
+
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedResponsesRequest() == nil {
+		t.Fatalf("expected semantic envelope to cache ResponsesRequest, got %+v", env)
+	}
+	if env.CachedResponsesRequest() != provider.capturedResponsesReq {
+		t.Fatal("cached ResponsesRequest does not match provider request")
+	}
+}
+
+func TestEmbeddings_UsesIngressFrameForDecoding(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"text-embedding-3-large"},
+			embeddingResponse: &core.EmbeddingResponse{
+				Object: "list",
+				Model:  "text-embedding-3-large",
+				Data: []core.EmbeddingData{
+					{Object: "embedding", Embedding: json.RawMessage(`[0.1,0.2]`), Index: 0},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = &explodingReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/embeddings",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"model":"text-embedding-3-large",
+			"input":"hello",
+			"x_meta":{"trace":"abc"}
+		}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := handler.Embeddings(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if provider.capturedEmbeddingReq == nil {
+		t.Fatal("expected embeddings request to be captured")
+	}
+	if provider.capturedEmbeddingReq.ExtraFields["x_meta"] == nil {
+		t.Fatalf("x_meta missing from ExtraFields: %+v", provider.capturedEmbeddingReq.ExtraFields)
+	}
+
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedEmbeddingRequest() == nil {
+		t.Fatalf("expected semantic envelope to cache EmbeddingRequest, got %+v", env)
+	}
+	if env.CachedEmbeddingRequest() != provider.capturedEmbeddingReq {
+		t.Fatal("cached EmbeddingRequest does not match provider request")
+	}
+}
+
+func TestBatches_UsesIngressFrameForDecoding(t *testing.T) {
+	mock := &mockProvider{
+		supportedModels: []string{"gpt-4o-mini"},
+		batchCreateResponse: &core.BatchResponse{
+			ID:               "provider-batch-123",
+			Object:           "batch",
+			Status:           "in_progress",
+			Endpoint:         "/v1/chat/completions",
+			CompletionWindow: "24h",
+			CreatedAt:        1234567890,
+			RequestCounts: core.BatchRequestCounts{
+				Total: 1,
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(mock, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/batches", nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Body = &explodingReadCloser{}
+
+	frame := core.NewIngressFrame(
+		http.MethodPost,
+		"/v1/batches",
+		nil,
+		nil,
+		nil,
+		"application/json",
+		[]byte(`{
+			"completion_window":"24h",
+			"requests":[{
+				"custom_id":"chat-1",
+				"method":"POST",
+				"url":"/v1/chat/completions",
+				"body":{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}]},
+				"x_item_flag":{"enabled":true}
+			}],
+			"x_top":{"trace":"batch-1"}
+		}`),
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := handler.Batches(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if mock.capturedBatchReq == nil {
+		t.Fatal("expected batch request to be captured")
+	}
+	if mock.capturedBatchReq.ExtraFields["x_top"] == nil {
+		t.Fatalf("x_top missing from ExtraFields: %+v", mock.capturedBatchReq.ExtraFields)
+	}
+	if len(mock.capturedBatchReq.Requests) != 1 {
+		t.Fatalf("len(Requests) = %d, want 1", len(mock.capturedBatchReq.Requests))
+	}
+	if mock.capturedBatchReq.Requests[0].ExtraFields["x_item_flag"] == nil {
+		t.Fatalf("x_item_flag missing from item ExtraFields: %+v", mock.capturedBatchReq.Requests[0].ExtraFields)
+	}
+
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedBatchRequest() == nil {
+		t.Fatalf("expected semantic envelope to cache BatchRequest, got %+v", env)
+	}
+	if env.CachedBatchRequest() != mock.capturedBatchReq {
+		t.Fatal("cached BatchRequest does not match provider request")
+	}
+}
+
+func TestGetBatch_UsesSemanticEnvelopeRouteMetadata(t *testing.T) {
+	mock := &mockProvider{
+		supportedModels: []string{"gpt-4o-mini"},
+		batchCreateResponse: &core.BatchResponse{
+			ID:               "provider-batch-123",
+			Object:           "batch",
+			Status:           "in_progress",
+			Endpoint:         "/v1/chat/completions",
+			CompletionWindow: "24h",
+			CreatedAt:        1234567890,
+			RequestCounts:    core.BatchRequestCounts{Total: 1},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(mock, nil, nil, nil)
+
+	createBody := `{
+		"endpoint":"/v1/chat/completions",
+		"requests":[{"custom_id":"chat-1","method":"POST","body":{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}]}}]
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/batches", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	createCtx := e.NewContext(createReq, createRec)
+	require.NoError(t, handler.Batches(createCtx))
+
+	var created core.BatchResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/batches/wrong-id", nil)
+	frame := core.NewIngressFrame(http.MethodGet, "/v1/batches/"+created.ID, map[string]string{"id": created.ID}, nil, nil, "", nil, false, "", nil)
+	ctx := core.WithIngressFrame(getReq.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	getReq = getReq.WithContext(ctx)
+
+	getRec := httptest.NewRecorder()
+	getCtx := e.NewContext(getReq, getRec)
+	getCtx.SetPath("/v1/batches/:id")
+	setPathParam(getCtx, "id", "wrong-id")
+
+	require.NoError(t, handler.GetBatch(getCtx))
+	require.Equal(t, http.StatusOK, getRec.Code)
+	assert.Contains(t, getRec.Body.String(), created.ID)
+}
+
+func TestListBatches_UsesSemanticEnvelopeQueryMetadata(t *testing.T) {
+	mock := &mockProvider{
+		supportedModels: []string{"gpt-4o-mini"},
+		batchCreateResponse: &core.BatchResponse{
+			ID:               "provider-batch-123",
+			Object:           "batch",
+			Status:           "in_progress",
+			Endpoint:         "/v1/chat/completions",
+			CompletionWindow: "24h",
+			CreatedAt:        1234567890,
+			RequestCounts:    core.BatchRequestCounts{Total: 1},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(mock, nil, nil, nil)
+
+	createBody := `{
+		"endpoint":"/v1/chat/completions",
+		"requests":[{"custom_id":"chat-1","method":"POST","body":{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi"}]}}]
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/batches", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	createCtx := e.NewContext(createReq, createRec)
+	require.NoError(t, handler.Batches(createCtx))
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/batches?limit=bad", nil)
+	frame := core.NewIngressFrame(
+		http.MethodGet,
+		"/v1/batches",
+		nil,
+		map[string][]string{
+			"limit": {"1"},
+		},
+		nil,
+		"",
+		nil,
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(listReq.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	listReq = listReq.WithContext(ctx)
+
+	listRec := httptest.NewRecorder()
+	listCtx := e.NewContext(listReq, listRec)
+
+	require.NoError(t, handler.ListBatches(listCtx))
+	require.Equal(t, http.StatusOK, listRec.Code)
+
+	var listResp core.BatchListResponse
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Data, 1)
+}
+
 func TestChatCompletionStreaming(t *testing.T) {
 	streamData := `data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
@@ -652,6 +1284,33 @@ func TestFlushStream_ReturnsWriteError(t *testing.T) {
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected write error %v, got %v", expectedErr, err)
 	}
+}
+
+func TestRequestIDFromContextOrHeader(t *testing.T) {
+	t.Run("prefers context request id", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("X-Request-ID", "header-id")
+		req = req.WithContext(core.WithRequestID(req.Context(), "context-id"))
+
+		if got := requestIDFromContextOrHeader(req); got != "context-id" {
+			t.Fatalf("requestIDFromContextOrHeader() = %q, want context-id", got)
+		}
+	})
+
+	t.Run("falls back to header request id", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.Header.Set("X-Request-ID", "  header-id  ")
+
+		if got := requestIDFromContextOrHeader(req); got != "header-id" {
+			t.Fatalf("requestIDFromContextOrHeader() = %q, want header-id", got)
+		}
+	})
+
+	t.Run("nil request returns empty", func(t *testing.T) {
+		if got := requestIDFromContextOrHeader(nil); got != "" {
+			t.Fatalf("requestIDFromContextOrHeader(nil) = %q, want empty", got)
+		}
+	})
 }
 
 func TestHandleStreamingResponse_RecordsStreamingError(t *testing.T) {
@@ -1393,6 +2052,61 @@ func TestBatches(t *testing.T) {
 	}
 }
 
+func TestBatches_FullURLResponsesItemUsesSharedSelectorExtraction(t *testing.T) {
+	mock := &mockProvider{
+		supportedModels: []string{"gpt-4o-mini"},
+		providerTypes: map[string]string{
+			"openai/gpt-4o-mini": "openai",
+		},
+		batchCreateResponse: &core.BatchResponse{
+			ID:            "provider-batch-234",
+			Object:        "batch",
+			Status:        "in_progress",
+			Endpoint:      "/v1/responses",
+			CreatedAt:     1234567890,
+			RequestCounts: core.BatchRequestCounts{Total: 1},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(mock, nil, nil, nil)
+
+	reqBody := `{
+	  "completion_window":"24h",
+	  "requests":[
+	    {
+	      "custom_id":"responses-1",
+	      "method":"POST",
+	      "url":"https://provider.example/v1/responses/",
+	      "body":{"model":"gpt-4o-mini","provider":"openai","input":"Hi"}
+	    }
+	  ]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/batches", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler.Batches(c)
+	if err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if mock.capturedBatchReq == nil {
+		t.Fatal("capturedBatchReq = nil")
+	}
+
+	var resp core.BatchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Provider != "openai" {
+		t.Fatalf("Provider = %q, want openai", resp.Provider)
+	}
+}
+
 func TestBatches_MixedProviderRejected(t *testing.T) {
 	mock := &mockProvider{
 		supportedModels: []string{"gpt-4o-mini", "claude-3-haiku-20240307"},
@@ -1851,6 +2565,7 @@ type capturingProvider struct {
 	mockProvider
 	capturedChatReq      *core.ChatRequest
 	capturedResponsesReq *core.ResponsesRequest
+	capturedEmbeddingReq *core.EmbeddingRequest
 }
 
 func (c *capturingProvider) ChatCompletion(_ context.Context, req *core.ChatRequest) (*core.ChatResponse, error) {
@@ -1866,9 +2581,28 @@ func (c *capturingProvider) StreamChatCompletion(_ context.Context, req *core.Ch
 	return io.NopCloser(strings.NewReader(c.streamData)), nil
 }
 
+func (c *capturingProvider) Responses(_ context.Context, req *core.ResponsesRequest) (*core.ResponsesResponse, error) {
+	c.capturedResponsesReq = req
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.responsesResponse, nil
+}
+
 func (c *capturingProvider) StreamResponses(_ context.Context, req *core.ResponsesRequest) (io.ReadCloser, error) {
 	c.capturedResponsesReq = req
 	return io.NopCloser(strings.NewReader(c.streamData)), nil
+}
+
+func (c *capturingProvider) Embeddings(_ context.Context, req *core.EmbeddingRequest) (*core.EmbeddingResponse, error) {
+	c.capturedEmbeddingReq = req
+	if c.embeddingErr != nil {
+		return nil, c.embeddingErr
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.embeddingResponse, nil
 }
 
 func TestStreamingResponses_DoesNotInjectStreamOptions(t *testing.T) {
@@ -1911,6 +2645,74 @@ func TestStreamingResponses_DoesNotInjectStreamOptions(t *testing.T) {
 	}
 	if provider.capturedResponsesReq.StreamOptions != nil {
 		t.Errorf("Responses streaming should NOT have StreamOptions injected, got: %+v", provider.capturedResponsesReq.StreamOptions)
+	}
+}
+
+func TestResponses_PreservesUnknownNestedFields(t *testing.T) {
+	provider := &capturingProvider{
+		mockProvider: mockProvider{
+			supportedModels: []string{"gpt-5-mini"},
+			responsesResponse: &core.ResponsesResponse{
+				ID:        "resp_123",
+				Object:    "response",
+				CreatedAt: 1234567890,
+				Model:     "gpt-5-mini",
+				Status:    "completed",
+				Output: []core.ResponsesOutputItem{
+					{
+						ID:     "msg_123",
+						Type:   "message",
+						Role:   "assistant",
+						Status: "completed",
+						Content: []core.ResponsesContentItem{
+							{Type: "output_text", Text: "ok"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+
+	reqBody := `{
+		"model":"gpt-5-mini",
+		"input":[{"type":"message","role":"user","content":"hello","x_trace":{"id":"trace-1"}}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := handler.Responses(c); err != nil {
+		t.Fatalf("handler returned error: %v", err)
+	}
+	if provider.capturedResponsesReq == nil {
+		t.Fatal("expected responses request to be captured")
+	}
+
+	input, ok := provider.capturedResponsesReq.Input.([]core.ResponsesInputElement)
+	if !ok || len(input) != 1 {
+		t.Fatalf("captured input = %#v, want []ResponsesInputElement len=1", provider.capturedResponsesReq.Input)
+	}
+	if input[0].ExtraFields["x_trace"] == nil {
+		t.Fatalf("input[0].x_trace missing from ExtraFields: %+v", input[0].ExtraFields)
+	}
+
+	body, err := json.Marshal(provider.capturedResponsesReq)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	decodedInput := decoded["input"].([]any)
+	firstInput := decodedInput[0].(map[string]any)
+	if _, ok := firstInput["x_trace"].(map[string]any); !ok {
+		t.Fatalf("input[0].x_trace = %#v, want object", firstInput["x_trace"])
 	}
 }
 
@@ -1993,6 +2795,10 @@ func TestCreateFile(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	frame := core.NewIngressFrame(http.MethodPost, "/v1/files", nil, nil, nil, writer.FormDataContentType(), nil, false, "", nil)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
@@ -2004,6 +2810,16 @@ func TestCreateFile(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "\"object\":\"file\"") {
 		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedFileRequest() == nil {
+		t.Fatal("expected file semantic envelope to be populated")
+	}
+	if env.CachedFileRequest().Purpose != "batch" {
+		t.Fatalf("purpose = %q, want batch", env.CachedFileRequest().Purpose)
+	}
+	if env.CachedFileRequest().Filename != "requests.jsonl" {
+		t.Fatalf("filename = %q, want requests.jsonl", env.CachedFileRequest().Filename)
 	}
 }
 
@@ -2109,6 +2925,23 @@ func TestListFiles(t *testing.T) {
 	handler := NewHandler(mock, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/files?limit=5", nil)
+	frame := core.NewIngressFrame(
+		http.MethodGet,
+		"/v1/files",
+		nil,
+		map[string][]string{
+			"limit": {"5"},
+		},
+		nil,
+		"",
+		nil,
+		false,
+		"",
+		nil,
+	)
+	ctx := core.WithIngressFrame(req.Context(), frame)
+	ctx = core.WithSemanticEnvelope(ctx, core.BuildSemanticEnvelope(frame))
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
@@ -2123,6 +2956,13 @@ func TestListFiles(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "\"id\":\"file_ok_1\"") {
 		t.Fatalf("unexpected response body: %s", rec.Body.String())
+	}
+	env := core.GetSemanticEnvelope(c.Request().Context())
+	if env == nil || env.CachedFileRequest() == nil {
+		t.Fatal("expected file semantic envelope to be populated")
+	}
+	if !env.CachedFileRequest().HasLimit || env.CachedFileRequest().Limit != 5 {
+		t.Fatalf("limit = %d/%v, want 5/true", env.CachedFileRequest().Limit, env.CachedFileRequest().HasLimit)
 	}
 }
 
@@ -2261,6 +3101,324 @@ func TestMergeStoredBatchFromUpstreamPreservesGatewayMetadata(t *testing.T) {
 	}
 	if stored.Metadata["new_key"] != "new-value" {
 		t.Fatalf("expected merged upstream key, got %q", stored.Metadata["new_key"])
+	}
+}
+
+func TestProviderPassthrough_OpenAI(t *testing.T) {
+	provider := &mockProvider{
+		passthroughResponse: &core.PassthroughResponse{
+			StatusCode: http.StatusAccepted,
+			Headers: map[string][]string{
+				"Content-Type":   {"application/json"},
+				"X-Upstream":     {"openai"},
+				"Set-Cookie":     {"session=secret"},
+				"Connection":     {"X-Upstream-Hop, Keep-Alive"},
+				"X-Upstream-Hop": {"secret"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/openai/responses?api-version=2026-03-10", strings.NewReader(`{"foo":"bar"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer user-secret")
+	req.Header.Set("Cookie", "session=user-secret")
+	req.Header.Set("Forwarded", "for=10.0.0.1")
+	req.Header.Set("OpenAI-Beta", "responses=v1")
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	req.Header.Set("Connection", "X-Debug, keep-alive")
+	req.Header.Set("X-Debug", "secret")
+	req.Header.Set("X-Request-ID", "req_123")
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if got := rec.Body.String(); got != `{"ok":true}` {
+		t.Fatalf("body = %q", got)
+	}
+	if got := rec.Header().Get("X-Upstream"); got != "openai" {
+		t.Fatalf("X-Upstream = %q, want openai", got)
+	}
+	if got := rec.Header().Get("Set-Cookie"); got != "" {
+		t.Fatalf("Set-Cookie should not be forwarded, got %q", got)
+	}
+	if got := rec.Header().Get("X-Upstream-Hop"); got != "" {
+		t.Fatalf("hop-by-hop header should not be forwarded, got %q", got)
+	}
+	if provider.lastPassthroughProvider != "openai" {
+		t.Fatalf("providerType = %q, want openai", provider.lastPassthroughProvider)
+	}
+	if provider.lastPassthroughReq == nil {
+		t.Fatal("lastPassthroughReq = nil")
+	}
+	if got := provider.lastPassthroughReq.Endpoint; got != "responses?api-version=2026-03-10" {
+		t.Fatalf("endpoint = %q", got)
+	}
+	if got := readPassthroughRequestBody(t, provider.lastPassthroughReq.Body); got != `{"foo":"bar"}` {
+		t.Fatalf("body = %q", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("Authorization"); got != "" {
+		t.Fatalf("authorization header should not be forwarded, got %q", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("Cookie"); got != "" {
+		t.Fatalf("cookie header should not be forwarded, got %q", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("Forwarded"); got != "" {
+		t.Fatalf("forwarded header should not be forwarded, got %q", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("X-Forwarded-For"); got != "" {
+		t.Fatalf("x-forwarded-for header should not be forwarded, got %q", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("X-Debug"); got != "" {
+		t.Fatalf("connection-nominated header should not be forwarded, got %q", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("OpenAI-Beta"); got != "responses=v1" {
+		t.Fatalf("OpenAI-Beta = %q, want responses=v1", got)
+	}
+	if got := provider.lastPassthroughReq.Headers.Get("X-Request-ID"); got != "req_123" {
+		t.Fatalf("X-Request-ID = %q, want req_123", got)
+	}
+}
+
+func TestProviderPassthrough_OpenAIV1AliasNormalizesByDefault(t *testing.T) {
+	provider := &mockProvider{
+		passthroughResponse: &core.PassthroughResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string][]string{
+				"Content-Type": {"application/json"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/openai/v1/chat/completions", strings.NewReader(`{"model":"gpt-5-mini"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if provider.lastPassthroughReq == nil {
+		t.Fatal("lastPassthroughReq = nil")
+	}
+	if got := provider.lastPassthroughReq.Endpoint; got != "chat/completions" {
+		t.Fatalf("endpoint = %q, want chat/completions", got)
+	}
+}
+
+func TestProviderPassthrough_AnthropicV1AliasNormalizesByDefault(t *testing.T) {
+	provider := &mockProvider{
+		passthroughResponse: &core.PassthroughResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string][]string{
+				"Content-Type": {"application/json"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/anthropic/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-5"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if provider.lastPassthroughReq == nil {
+		t.Fatal("lastPassthroughReq = nil")
+	}
+	if got := provider.lastPassthroughReq.Endpoint; got != "messages" {
+		t.Fatalf("endpoint = %q, want messages", got)
+	}
+}
+
+func TestProviderPassthrough_V1AliasDisabledReturnsBadRequest(t *testing.T) {
+	provider := &mockProvider{
+		passthroughResponse: &core.PassthroughResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string][]string{
+				"Content-Type": {"application/json"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	handler.normalizePassthroughV1Prefix = false
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/openai/v1/chat/completions", strings.NewReader(`{"model":"gpt-5-mini"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "v1 alias is disabled") {
+		t.Fatalf("body = %q, want v1 alias error", rec.Body.String())
+	}
+	if provider.lastPassthroughReq != nil {
+		t.Fatalf("provider should not have been called, got endpoint %q", provider.lastPassthroughReq.Endpoint)
+	}
+}
+
+func TestProviderPassthrough_AnthropicStream(t *testing.T) {
+	provider := &mockProvider{
+		passthroughResponse: &core.PassthroughResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string][]string{
+				"Content-Type": {"text/event-stream"},
+			},
+			Body: &chunkedReadCloser{
+				chunks: [][]byte{
+					[]byte("event: message_start\n"),
+					[]byte("data: {\"type\":\"message_start\"}\n\n"),
+				},
+			},
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/anthropic/messages", strings.NewReader(`{"model":"claude-sonnet-4-5"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := &flushCountingRecorder{ResponseRecorder: httptest.NewRecorder()}
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content-type = %q", got)
+	}
+	if rec.flushes == 0 {
+		t.Fatal("expected streaming response to flush")
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "message_start") {
+		t.Fatalf("unexpected stream body: %q", got)
+	}
+}
+
+func TestPassthroughStreamAuditPath_NormalizesKnownEndpoints(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestPath string
+		provider    string
+		endpoint    string
+		want        string
+	}{
+		{
+			name:        "openai responses",
+			requestPath: "/p/openai/responses",
+			provider:    "openai",
+			endpoint:    "responses?trace=1",
+			want:        "/v1/responses",
+		},
+		{
+			name:        "anthropic messages",
+			requestPath: "/p/anthropic/messages",
+			provider:    "anthropic",
+			endpoint:    "messages",
+			want:        "/v1/messages",
+		},
+		{
+			name:        "unknown endpoint falls back",
+			requestPath: "/p/openai/unknown",
+			provider:    "openai",
+			endpoint:    "unknown",
+			want:        "/p/openai/unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := passthroughStreamAuditPath(tt.requestPath, tt.provider, tt.endpoint); got != tt.want {
+				t.Fatalf("passthroughStreamAuditPath(%q, %q, %q) = %q, want %q", tt.requestPath, tt.provider, tt.endpoint, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProviderPassthrough_RejectsUnsupportedProvider(t *testing.T) {
+	provider := &mockProvider{}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/groq/chat/completions", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `provider passthrough for \"groq\" is not enabled`) {
+		t.Fatalf("unexpected error body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "anthropic, openai") {
+		t.Fatalf("unexpected error body: %s", rec.Body.String())
+	}
+}
+
+func TestProviderPassthrough_UsesConfiguredSupportedProviders(t *testing.T) {
+	provider := &mockProvider{
+		passthroughResponse: &core.PassthroughResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		},
+	}
+
+	e := echo.New()
+	handler := NewHandler(provider, nil, nil, nil)
+	handler.setSupportedPassthroughProviders([]string{"groq"})
+	e.POST("/p/:provider/*", handler.ProviderPassthrough)
+
+	req := httptest.NewRequest(http.MethodPost, "/p/groq/chat/completions", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if provider.lastPassthroughProvider != "groq" {
+		t.Fatalf("providerType = %q, want groq", provider.lastPassthroughProvider)
+	}
+	if provider.lastPassthroughReq == nil {
+		t.Fatal("lastPassthroughReq = nil")
+	}
+	if got := provider.lastPassthroughReq.Endpoint; got != "chat/completions" {
+		t.Fatalf("endpoint = %q, want chat/completions", got)
+	}
+	if got := readPassthroughRequestBody(t, provider.lastPassthroughReq.Body); got != `{}` {
+		t.Fatalf("body = %q, want {}", got)
+	}
+	if got := rec.Body.String(); !strings.Contains(got, `"ok":true`) {
+		t.Fatalf("unexpected error body: %s", rec.Body.String())
 	}
 }
 

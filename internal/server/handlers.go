@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,23 +33,29 @@ var batchResultsPending404Providers = map[string]struct{}{
 	"anthropic": {},
 }
 
+var defaultSupportedPassthroughProviders = []string{"openai", "anthropic"}
+
 // Handler holds the HTTP handlers
 type Handler struct {
-	provider        core.RoutableProvider
-	logger          auditlog.LoggerInterface
-	usageLogger     usage.LoggerInterface
-	pricingResolver usage.PricingResolver
-	batchStore      batchstore.Store
+	provider                      core.RoutableProvider
+	logger                        auditlog.LoggerInterface
+	usageLogger                   usage.LoggerInterface
+	pricingResolver               usage.PricingResolver
+	batchStore                    batchstore.Store
+	normalizePassthroughV1Prefix  bool
+	supportedPassthroughProviders map[string]struct{}
 }
 
 // NewHandler creates a new handler with the given routable provider (typically the Router)
 func NewHandler(provider core.RoutableProvider, logger auditlog.LoggerInterface, usageLogger usage.LoggerInterface, pricingResolver usage.PricingResolver) *Handler {
 	return &Handler{
-		provider:        provider,
-		logger:          logger,
-		usageLogger:     usageLogger,
-		pricingResolver: pricingResolver,
-		batchStore:      batchstore.NewMemoryStore(),
+		provider:                      provider,
+		logger:                        logger,
+		usageLogger:                   usageLogger,
+		pricingResolver:               pricingResolver,
+		batchStore:                    batchstore.NewMemoryStore(),
+		normalizePassthroughV1Prefix:  true,
+		supportedPassthroughProviders: normalizeSupportedPassthroughProviders(defaultSupportedPassthroughProviders),
 	}
 }
 
@@ -60,6 +66,10 @@ func (h *Handler) SetBatchStore(store batchstore.Store) {
 		return
 	}
 	h.batchStore = store
+}
+
+func (h *Handler) setSupportedPassthroughProviders(providerTypes []string) {
+	h.supportedPassthroughProviders = normalizeSupportedPassthroughProviders(providerTypes)
 }
 
 // handleStreamingResponse handles SSE streaming responses for both ChatCompletion and Responses endpoints.
@@ -85,7 +95,7 @@ func (h *Handler) handleStreamingResponse(c *echo.Context, model, provider strin
 	wrappedStream := auditlog.WrapStreamForLogging(stream, h.logger, streamEntry, c.Request().URL.Path)
 
 	// Wrap with usage tracking if enabled
-	requestID := c.Request().Header.Get("X-Request-ID")
+	requestID := requestIDFromContextOrHeader(c.Request())
 	endpoint := c.Request().URL.Path
 	wrappedStream = usage.WrapStreamForUsage(wrappedStream, h.usageLogger, model, provider, requestID, endpoint, h.pricingResolver)
 
@@ -157,6 +167,17 @@ func recordStreamingError(streamEntry *auditlog.LogEntry, model, provider, path,
 	)
 }
 
+func requestIDFromContextOrHeader(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	requestID := strings.TrimSpace(core.GetRequestID(req.Context()))
+	if requestID != "" {
+		return requestID
+	}
+	return strings.TrimSpace(req.Header.Get("X-Request-ID"))
+}
+
 func (h *Handler) logUsage(model, providerType string, extractFn func(*core.ModelPricing) *usage.UsageEntry) {
 	if h.usageLogger == nil || !h.usageLogger.Config().Enabled {
 		return
@@ -170,14 +191,307 @@ func (h *Handler) logUsage(model, providerType string, extractFn func(*core.Mode
 	}
 }
 
-func resolveModelSelector(model, provider *string) error {
-	selector, err := core.ParseModelSelector(*model, *provider)
-	if err != nil {
-		return core.NewInvalidRequestError(err.Error(), err)
+func resolveModelSelector(ctx context.Context, model, provider *string) error {
+	return core.NormalizeModelSelector(core.GetSemanticEnvelope(ctx), model, provider)
+}
+
+func isSupportedPassthroughProvider(providerType string, supportedPassthroughProviders map[string]struct{}) bool {
+	providerType = strings.TrimSpace(providerType)
+	if providerType == "" {
+		return false
 	}
-	*model = selector.Model
-	*provider = selector.Provider
+	_, ok := supportedPassthroughProviders[providerType]
+	return ok
+}
+
+func normalizeSupportedPassthroughProviders(providerTypes []string) map[string]struct{} {
+	supported := make(map[string]struct{}, len(providerTypes))
+	for _, providerType := range providerTypes {
+		providerType = strings.TrimSpace(providerType)
+		if providerType == "" {
+			continue
+		}
+		supported[providerType] = struct{}{}
+	}
+	return supported
+}
+
+func (h *Handler) supportedPassthroughProviderNames() []string {
+	providers := make([]string, 0, len(h.supportedPassthroughProviders))
+	for providerType := range h.supportedPassthroughProviders {
+		providers = append(providers, providerType)
+	}
+	sort.Strings(providers)
+	return providers
+}
+
+func (h *Handler) unsupportedPassthroughProviderError(providerType string) error {
+	providers := h.supportedPassthroughProviderNames()
+	if len(providers) == 0 {
+		return core.NewInvalidRequestError("provider passthrough is not enabled for any providers", nil)
+	}
+	return core.NewInvalidRequestError(
+		fmt.Sprintf("provider passthrough for %q is not enabled; currently supported providers: %s", strings.TrimSpace(providerType), strings.Join(providers, ", ")),
+		nil,
+	)
+}
+
+func normalizePassthroughEndpoint(endpoint string, enabled bool) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	switch {
+	case endpoint == "v1":
+		if !enabled {
+			return "", core.NewInvalidRequestError("provider passthrough v1 alias is disabled; use /p/{provider}/... without the v1 prefix", nil)
+		}
+		return "", nil
+	case strings.HasPrefix(endpoint, "v1/"):
+		if !enabled {
+			return "", core.NewInvalidRequestError("provider passthrough v1 alias is disabled; use /p/{provider}/... without the v1 prefix", nil)
+		}
+		return strings.TrimPrefix(endpoint, "v1/"), nil
+	default:
+		return endpoint, nil
+	}
+}
+
+func (h *Handler) passthroughEndpoint(c *echo.Context) (string, string, error) {
+	providerType, endpoint, ok := core.ParseProviderPassthroughPath(c.Request().URL.Path)
+	if !ok {
+		return "", "", core.NewInvalidRequestError("invalid provider passthrough path", nil)
+	}
+	endpoint, err := normalizePassthroughEndpoint(endpoint, h.normalizePassthroughV1Prefix)
+	if err != nil {
+		return "", "", err
+	}
+	if endpoint == "" {
+		return "", "", core.NewInvalidRequestError("provider passthrough endpoint is required", nil)
+	}
+	if rawQuery := strings.TrimSpace(c.Request().URL.RawQuery); rawQuery != "" {
+		endpoint += "?" + rawQuery
+	}
+	return providerType, endpoint, nil
+}
+
+func buildPassthroughHeaders(ctx context.Context, src http.Header) http.Header {
+	connectionHeaders := passthroughConnectionHeaders(src)
+	dst := make(http.Header)
+	for key, values := range src {
+		canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if skipPassthroughRequestHeader(canonicalKey) || len(values) == 0 {
+			continue
+		}
+		if _, hopByHop := connectionHeaders[canonicalKey]; hopByHop {
+			continue
+		}
+		clonedValues := make([]string, len(values))
+		copy(clonedValues, values)
+		dst[canonicalKey] = clonedValues
+	}
+	requestID := strings.TrimSpace(src.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = strings.TrimSpace(core.GetRequestID(ctx))
+	}
+	if requestID != "" && strings.TrimSpace(dst.Get("X-Request-ID")) == "" {
+		dst.Set("X-Request-ID", requestID)
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func skipPassthroughHeader(key string) bool {
+	canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(key))
+	switch canonicalKey {
+	case "Authorization", "X-Api-Key", "Host", "Content-Length", "Connection", "Keep-Alive",
+		"Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
+		"Cookie", "Forwarded", "Set-Cookie":
+		return true
+	default:
+		return strings.HasPrefix(canonicalKey, "X-Forwarded-")
+	}
+}
+
+func skipPassthroughRequestHeader(key string) bool {
+	return skipPassthroughHeader(key)
+}
+
+func passthroughConnectionHeaders(headers http.Header) map[string]struct{} {
+	var tokens map[string]struct{}
+	for key, values := range headers {
+		if http.CanonicalHeaderKey(strings.TrimSpace(key)) != "Connection" {
+			continue
+		}
+		for _, value := range values {
+			for _, token := range strings.Split(value, ",") {
+				canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(token))
+				if canonicalKey == "" {
+					continue
+				}
+				if tokens == nil {
+					tokens = make(map[string]struct{})
+				}
+				tokens[canonicalKey] = struct{}{}
+			}
+		}
+	}
+	return tokens
+}
+
+func copyPassthroughResponseHeaders(dst, src http.Header) {
+	connectionHeaders := passthroughConnectionHeaders(src)
+	for key, values := range src {
+		canonicalKey := http.CanonicalHeaderKey(strings.TrimSpace(key))
+		if skipPassthroughHeader(canonicalKey) || len(values) == 0 {
+			continue
+		}
+		if _, hopByHop := connectionHeaders[canonicalKey]; hopByHop {
+			continue
+		}
+		dst.Del(canonicalKey)
+		for _, value := range values {
+			dst.Add(canonicalKey, value)
+		}
+	}
+}
+
+func isSSEContentType(headers map[string][]string) bool {
+	for key, values := range headers {
+		if !strings.EqualFold(key, "Content-Type") {
+			continue
+		}
+		for _, value := range values {
+			if strings.Contains(strings.ToLower(value), "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func passthroughStreamAuditPath(requestPath, providerType, endpoint string) string {
+	normalized := "/" + strings.TrimLeft(strings.SplitN(endpoint, "?", 2)[0], "/")
+	switch providerType {
+	case "openai":
+		switch normalized {
+		case "/chat/completions":
+			return "/v1/chat/completions"
+		case "/responses":
+			return "/v1/responses"
+		}
+	case "anthropic":
+		switch normalized {
+		case "/messages":
+			return "/v1/messages"
+		}
+	}
+	return requestPath
+}
+
+func (h *Handler) proxyPassthroughResponse(c *echo.Context, providerType, endpoint string, resp *core.PassthroughResponse) error {
+	if resp == nil || resp.Body == nil {
+		return handleError(c, core.NewProviderError(providerType, http.StatusBadGateway, "provider returned empty passthrough response", nil))
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	copyPassthroughResponseHeaders(c.Response().Header(), http.Header(resp.Headers))
+
+	if isSSEContentType(resp.Headers) {
+		auditlog.MarkEntryAsStreaming(c, true)
+		auditlog.EnrichEntryWithStream(c, true)
+
+		entry := auditlog.GetStreamEntryFromContext(c)
+		streamEntry := auditlog.CreateStreamEntry(entry)
+		if streamEntry != nil {
+			streamEntry.StatusCode = resp.StatusCode
+		}
+
+		wrappedStream := auditlog.WrapStreamForLogging(resp.Body, h.logger, streamEntry, passthroughStreamAuditPath(c.Request().URL.Path, providerType, endpoint))
+		defer func() {
+			_ = wrappedStream.Close()
+		}()
+
+		c.Response().WriteHeader(resp.StatusCode)
+		if err := flushStream(c.Response(), wrappedStream); err != nil {
+			recordStreamingError(streamEntry, "", providerType, c.Request().URL.Path, requestIDFromContextOrHeader(c.Request()), err)
+			return err
+		}
+		return nil
+	}
+
+	c.Response().WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(c.Response(), resp.Body); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ProviderPassthrough handles opaque provider-native requests under /p/{provider}/{endpoint}.
+//
+// OpenAI and Anthropic are the first-class providers in this ADR-0002 slice. Other
+// providers are intentionally deferred until they fit the same low-friction opaque path.
+//
+// @Summary      Provider passthrough
+// @Description  Runtime-configurable passthrough endpoint under /p/{provider}/{endpoint}; enabled by default via server.enable_provider_passthrough. The endpoint path is opaque and may proxy JSON, binary, or SSE responses with upstream status codes preserved. For multi-segment provider endpoints, clients that rely on OpenAPI-generated path handling should URL-encode embedded slashes in the endpoint parameter. A leading v1/ segment is normalized away by default so /p/{provider}/v1/... and /p/{provider}/... map to the same upstream path relative to the provider base URL.
+// @Tags         passthrough
+// @Accept       json
+// @Accept       mpfd
+// @Produce      json
+// @Produce      application/octet-stream
+// @Produce      text/event-stream
+// @Security     BearerAuth
+// @Param        provider  path      string  true  "Provider type"
+// @Param        endpoint  path      string  true  "Provider-native endpoint path relative to the provider base URL. URL-encode embedded / characters when using generated clients."
+// @Success      200       {file}    file    "Opaque upstream response body"
+// @Success      201       {file}    file    "Opaque upstream response body"
+// @Success      202       {file}    file    "Opaque upstream response body"
+// @Success      204       {string}  string  "No Content passthrough response"
+// @Failure      400       {object}  core.GatewayError
+// @Failure      401       {object}  core.GatewayError
+// @Failure      502       {object}  core.GatewayError
+// @Router       /p/{provider}/{endpoint} [get]
+// @Router       /p/{provider}/{endpoint} [post]
+// @Router       /p/{provider}/{endpoint} [put]
+// @Router       /p/{provider}/{endpoint} [patch]
+// @Router       /p/{provider}/{endpoint} [delete]
+// @Router       /p/{provider}/{endpoint} [head]
+// @Router       /p/{provider}/{endpoint} [options]
+func (h *Handler) ProviderPassthrough(c *echo.Context) error {
+	passthroughProvider, ok := h.provider.(core.PassthroughRoutableProvider)
+	if !ok {
+		return handleError(c, core.NewInvalidRequestError("provider passthrough is not supported by the current provider router", nil))
+	}
+
+	providerType, endpoint, err := h.passthroughEndpoint(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+	if !isSupportedPassthroughProvider(providerType, h.supportedPassthroughProviders) {
+		return handleError(c, h.unsupportedPassthroughProviderError(providerType))
+	}
+
+	ctx := c.Request().Context()
+	requestID := strings.TrimSpace(c.Request().Header.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = strings.TrimSpace(core.GetRequestID(ctx))
+	}
+	if requestID != "" {
+		ctx = core.WithRequestID(ctx, requestID)
+	}
+	resp, err := passthroughProvider.Passthrough(ctx, providerType, &core.PassthroughRequest{
+		Method:   c.Request().Method,
+		Endpoint: endpoint,
+		Body:     c.Request().Body,
+		Headers:  buildPassthroughHeaders(ctx, c.Request().Header),
+	})
+	if err != nil {
+		return handleError(c, err)
+	}
+
+	auditlog.EnrichEntry(c, "passthrough", providerType)
+	return h.proxyPassthroughResponse(c, providerType, endpoint, resp)
 }
 
 // ChatCompletion handles POST /v1/chat/completions
@@ -196,11 +510,11 @@ func resolveModelSelector(model, provider *string) error {
 // @Failure      502      {object}  core.GatewayError
 // @Router       /v1/chat/completions [post]
 func (h *Handler) ChatCompletion(c *echo.Context) error {
-	var req core.ChatRequest
-	if err := c.Bind(&req); err != nil {
+	req, err := canonicalJSONRequestFromSemanticEnvelope[*core.ChatRequest](c, core.DecodeChatRequest)
+	if err != nil {
 		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
 	}
-	if err := resolveModelSelector(&req.Model, &req.Provider); err != nil {
+	if err := resolveModelSelector(c.Request().Context(), &req.Model, &req.Provider); err != nil {
 		return handleError(c, err)
 	}
 
@@ -216,11 +530,11 @@ func (h *Handler) ChatCompletion(c *echo.Context) error {
 			req.StreamOptions.IncludeUsage = true
 		}
 		return h.handleStreamingResponse(c, req.Model, providerType, func() (io.ReadCloser, error) {
-			return h.provider.StreamChatCompletion(ctx, &req)
+			return h.provider.StreamChatCompletion(ctx, req)
 		})
 	}
 
-	resp, err := h.provider.ChatCompletion(ctx, &req)
+	resp, err := h.provider.ChatCompletion(ctx, req)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -299,13 +613,6 @@ func (h *Handler) fileProviderTypes(ctx *echo.Context) ([]string, error) {
 	return providers, nil
 }
 
-func resolveProviderHint(c *echo.Context) string {
-	if provider := strings.TrimSpace(c.QueryParam("provider")); provider != "" {
-		return provider
-	}
-	return strings.TrimSpace(c.FormValue("provider"))
-}
-
 func (h *Handler) fileByID(
 	c *echo.Context,
 	callFn func(core.NativeFileRoutableProvider, string, string) (any, error),
@@ -316,12 +623,17 @@ func (h *Handler) fileByID(
 		return handleError(c, err)
 	}
 
-	id := strings.TrimSpace(c.Param("id"))
+	fileReq, err := fileRequestFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+
+	id := strings.TrimSpace(fileReq.FileID)
 	if id == "" {
 		return handleError(c, core.NewInvalidRequestError("file id is required", nil))
 	}
 
-	if providerType := resolveProviderHint(c); providerType != "" {
+	if providerType := fileReq.Provider; providerType != "" {
 		auditlog.EnrichEntry(c, "file", providerType)
 		result, err := callFn(nativeRouter, providerType, id)
 		if err != nil {
@@ -417,12 +729,17 @@ func (h *Handler) CreateFile(c *echo.Context) error {
 		return handleError(c, err)
 	}
 
+	fileReq, err := fileRequestFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+
 	providers, err := h.fileProviderTypes(c)
 	if err != nil {
 		return handleError(c, err)
 	}
 
-	providerType := resolveProviderHint(c)
+	providerType := fileReq.Provider
 	if providerType == "" {
 		if len(providers) == 1 {
 			providerType = providers[0]
@@ -434,7 +751,7 @@ func (h *Handler) CreateFile(c *echo.Context) error {
 	}
 	auditlog.EnrichEntry(c, "file", providerType)
 
-	purpose := strings.TrimSpace(c.FormValue("purpose"))
+	purpose := strings.TrimSpace(fileReq.Purpose)
 	if purpose == "" {
 		return handleError(c, core.NewInvalidRequestError("purpose is required", nil))
 	}
@@ -458,9 +775,13 @@ func (h *Handler) CreateFile(c *echo.Context) error {
 
 	requestID := strings.TrimSpace(c.Request().Header.Get("X-Request-ID"))
 	ctx := core.WithRequestID(c.Request().Context(), requestID)
+	filename := strings.TrimSpace(fileReq.Filename)
+	if filename == "" {
+		filename = fileHeader.Filename
+	}
 	resp, err := nativeRouter.CreateFile(ctx, providerType, &core.FileCreateRequest{
 		Purpose:  purpose,
-		Filename: fileHeader.Filename,
+		Filename: filename,
 		Content:  content,
 	})
 	if err != nil {
@@ -491,13 +812,13 @@ func (h *Handler) ListFiles(c *echo.Context) error {
 		return handleError(c, err)
 	}
 
+	fileReq, err := fileRequestFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
+	}
 	limit := 20
-	if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil {
-			return handleError(c, core.NewInvalidRequestError("invalid limit parameter", err))
-		}
-		limit = parsed
+	if fileReq.HasLimit {
+		limit = fileReq.Limit
 	}
 	if limit <= 0 {
 		limit = 20
@@ -506,9 +827,9 @@ func (h *Handler) ListFiles(c *echo.Context) error {
 		limit = 100
 	}
 
-	purpose := strings.TrimSpace(c.QueryParam("purpose"))
-	after := strings.TrimSpace(c.QueryParam("after"))
-	providerType := strings.TrimSpace(c.QueryParam("provider"))
+	purpose := fileReq.Purpose
+	after := fileReq.After
+	providerType := fileReq.Provider
 
 	if providerType != "" {
 		auditlog.EnrichEntry(c, "file", providerType)
@@ -667,11 +988,11 @@ func (h *Handler) GetFileContent(c *echo.Context) error {
 // @Failure      502      {object}  core.GatewayError
 // @Router       /v1/responses [post]
 func (h *Handler) Responses(c *echo.Context) error {
-	var req core.ResponsesRequest
-	if err := c.Bind(&req); err != nil {
+	req, err := canonicalJSONRequestFromSemanticEnvelope[*core.ResponsesRequest](c, core.DecodeResponsesRequest)
+	if err != nil {
 		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
 	}
-	if err := resolveModelSelector(&req.Model, &req.Provider); err != nil {
+	if err := resolveModelSelector(c.Request().Context(), &req.Model, &req.Provider); err != nil {
 		return handleError(c, err)
 	}
 
@@ -680,11 +1001,11 @@ func (h *Handler) Responses(c *echo.Context) error {
 
 	if req.Stream {
 		return h.handleStreamingResponse(c, req.Model, providerType, func() (io.ReadCloser, error) {
-			return h.provider.StreamResponses(ctx, &req)
+			return h.provider.StreamResponses(ctx, req)
 		})
 	}
 
-	resp, err := h.provider.Responses(ctx, &req)
+	resp, err := h.provider.Responses(ctx, req)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -711,18 +1032,18 @@ func (h *Handler) Responses(c *echo.Context) error {
 // @Failure      502      {object}  core.GatewayError
 // @Router       /v1/embeddings [post]
 func (h *Handler) Embeddings(c *echo.Context) error {
-	var req core.EmbeddingRequest
-	if err := c.Bind(&req); err != nil {
+	req, err := canonicalJSONRequestFromSemanticEnvelope[*core.EmbeddingRequest](c, core.DecodeEmbeddingRequest)
+	if err != nil {
 		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
 	}
-	if err := resolveModelSelector(&req.Model, &req.Provider); err != nil {
+	if err := resolveModelSelector(c.Request().Context(), &req.Model, &req.Provider); err != nil {
 		return handleError(c, err)
 	}
 
 	ctx, providerType := ModelCtx(c)
 	requestID := c.Request().Header.Get("X-Request-ID")
 
-	resp, err := h.provider.Embeddings(ctx, &req)
+	resp, err := h.provider.Embeddings(ctx, req)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -751,8 +1072,8 @@ func (h *Handler) Embeddings(c *echo.Context) error {
 // @Failure      502      {object}  core.GatewayError
 // @Router       /v1/batches [post]
 func (h *Handler) Batches(c *echo.Context) error {
-	var req core.BatchRequest
-	if err := c.Bind(&req); err != nil {
+	req, err := canonicalJSONRequestFromSemanticEnvelope[*core.BatchRequest](c, core.DecodeBatchRequest)
+	if err != nil {
 		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
 	}
 
@@ -764,13 +1085,13 @@ func (h *Handler) Batches(c *echo.Context) error {
 		return handleError(c, core.NewInvalidRequestError("batch routing is not supported by the current provider router", nil))
 	}
 
-	providerType, err := determineBatchProviderType(h.provider, &req)
+	providerType, err := determineBatchProviderType(h.provider, req)
 	if err != nil {
 		return handleError(c, err)
 	}
 	auditlog.EnrichEntry(c, "batch", providerType)
 
-	upstream, err := nativeRouter.CreateBatch(ctx, providerType, &req)
+	upstream, err := nativeRouter.CreateBatch(ctx, providerType, req)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -792,7 +1113,7 @@ func (h *Handler) Batches(c *echo.Context) error {
 	resp.ID = "batch_" + uuid.NewString()
 	resp.Object = "batch"
 	if resp.Endpoint == "" {
-		resp.Endpoint = normalizeBatchEndpoint(req.Endpoint)
+		resp.Endpoint = core.NormalizeOperationPath(req.Endpoint)
 	}
 	if resp.CompletionWindow == "" {
 		resp.CompletionWindow = req.CompletionWindow
@@ -840,10 +1161,11 @@ func determineBatchProviderType(provider core.RoutableProvider, req *core.BatchR
 
 	var providerType string
 	for i, item := range req.Requests {
-		model, err := extractBatchItemModel(resolveBatchEndpoint(req.Endpoint, item.URL), item.Method, item.Body)
+		selector, err := core.BatchItemModelSelector(req.Endpoint, item)
 		if err != nil {
 			return "", core.NewInvalidRequestError(fmt.Sprintf("batch item %d: %s", i, err.Error()), err)
 		}
+		model := selector.QualifiedModel()
 		if model == "" {
 			return "", core.NewInvalidRequestError(fmt.Sprintf("batch item %d: model is required", i), nil)
 		}
@@ -864,58 +1186,6 @@ func determineBatchProviderType(provider core.RoutableProvider, req *core.BatchR
 		return "", core.NewInvalidRequestError("unable to resolve provider for batch", nil)
 	}
 	return providerType, nil
-}
-
-func extractBatchItemModel(endpoint, method string, body json.RawMessage) (string, error) {
-	normalized := normalizeBatchEndpoint(endpoint)
-	if normalized == "" {
-		return "", fmt.Errorf("url is required")
-	}
-	normalizedMethod := strings.ToUpper(strings.TrimSpace(method))
-	if normalizedMethod == "" {
-		normalizedMethod = http.MethodPost
-	}
-	if normalizedMethod != http.MethodPost {
-		return "", fmt.Errorf("only POST is supported")
-	}
-	if len(body) == 0 {
-		return "", fmt.Errorf("body is required")
-	}
-
-	switch normalized {
-	case "/v1/chat/completions":
-		var req core.ChatRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			return "", fmt.Errorf("invalid chat request body: %w", err)
-		}
-		selector, err := core.ParseModelSelector(req.Model, req.Provider)
-		if err != nil {
-			return "", err
-		}
-		return selector.QualifiedModel(), nil
-	case "/v1/responses":
-		var req core.ResponsesRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			return "", fmt.Errorf("invalid responses request body: %w", err)
-		}
-		selector, err := core.ParseModelSelector(req.Model, req.Provider)
-		if err != nil {
-			return "", err
-		}
-		return selector.QualifiedModel(), nil
-	case "/v1/embeddings":
-		var req core.EmbeddingRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			return "", fmt.Errorf("invalid embeddings request body: %w", err)
-		}
-		selector, err := core.ParseModelSelector(req.Model, req.Provider)
-		if err != nil {
-			return "", err
-		}
-		return selector.QualifiedModel(), nil
-	default:
-		return "", fmt.Errorf("unsupported batch item url: %s", normalized)
-	}
 }
 
 func (h *Handler) loadBatch(c *echo.Context, id string) (*core.BatchResponse, error) {
@@ -945,7 +1215,14 @@ func (h *Handler) loadBatch(c *echo.Context, id string) (*core.BatchResponse, er
 // @Failure      502  {object}  core.GatewayError
 // @Router       /v1/batches/{id} [get]
 func (h *Handler) GetBatch(c *echo.Context) error {
-	id := strings.TrimSpace(c.Param("id"))
+	batchMeta, err := batchRequestMetadataFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+	id := ""
+	if batchMeta != nil {
+		id = strings.TrimSpace(batchMeta.BatchID)
+	}
 	if id == "" {
 		return handleError(c, core.NewInvalidRequestError("batch id is required", nil))
 	}
@@ -992,16 +1269,20 @@ func (h *Handler) GetBatch(c *echo.Context) error {
 // @Failure      500    {object}  core.GatewayError
 // @Router       /v1/batches [get]
 func (h *Handler) ListBatches(c *echo.Context) error {
-	limit := 20
-	if v := strings.TrimSpace(c.QueryParam("limit")); v != "" {
-		parsed, err := strconv.Atoi(v)
-		if err != nil {
-			return handleError(c, core.NewInvalidRequestError("invalid limit parameter", err))
-		}
-		limit = parsed
+	batchMeta, err := batchRequestMetadataFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
 	}
 
-	after := strings.TrimSpace(c.QueryParam("after"))
+	limit := 20
+	if batchMeta != nil && batchMeta.HasLimit {
+		limit = batchMeta.Limit
+	}
+
+	after := ""
+	if batchMeta != nil {
+		after = strings.TrimSpace(batchMeta.After)
+	}
 	normalizedLimit := limit
 	if normalizedLimit <= 0 {
 		normalizedLimit = 20
@@ -1061,7 +1342,14 @@ func (h *Handler) ListBatches(c *echo.Context) error {
 // @Failure      502  {object}  core.GatewayError
 // @Router       /v1/batches/{id}/cancel [post]
 func (h *Handler) CancelBatch(c *echo.Context) error {
-	id := strings.TrimSpace(c.Param("id"))
+	batchMeta, err := batchRequestMetadataFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+	id := ""
+	if batchMeta != nil {
+		id = strings.TrimSpace(batchMeta.BatchID)
+	}
 	if id == "" {
 		return handleError(c, core.NewInvalidRequestError("batch id is required", nil))
 	}
@@ -1110,7 +1398,14 @@ func (h *Handler) CancelBatch(c *echo.Context) error {
 // @Failure      502  {object}  core.GatewayError
 // @Router       /v1/batches/{id}/results [get]
 func (h *Handler) BatchResults(c *echo.Context) error {
-	id := strings.TrimSpace(c.Param("id"))
+	batchMeta, err := batchRequestMetadataFromSemanticEnvelope(c)
+	if err != nil {
+		return handleError(c, err)
+	}
+	id := ""
+	if batchMeta != nil {
+		id = strings.TrimSpace(batchMeta.BatchID)
+	}
 	if id == "" {
 		return handleError(c, core.NewInvalidRequestError("batch id is required", nil))
 	}
@@ -1179,32 +1474,6 @@ func (h *Handler) BatchResults(c *echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, result)
-}
-
-func resolveBatchEndpoint(topLevel, itemURL string) string {
-	if strings.TrimSpace(itemURL) != "" {
-		return itemURL
-	}
-	return topLevel
-}
-
-func normalizeBatchEndpoint(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if parsed, err := url.Parse(trimmed); err == nil && parsed.Path != "" {
-		trimmed = parsed.Path
-	}
-	trimmed = strings.TrimSpace(trimmed)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = strings.TrimRight(trimmed, "/")
-	if trimmed == "" {
-		return "/"
-	}
-	return trimmed
 }
 
 func (h *Handler) logBatchUsageFromBatchResults(stored *core.BatchResponse, result *core.BatchResultsResponse, fallbackRequestID string) bool {

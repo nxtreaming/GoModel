@@ -14,6 +14,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -155,14 +156,106 @@ type Request struct {
 	Method   string
 	Endpoint string
 	Body     interface{} // Will be JSON marshaled if not nil
-	RawBody  []byte      // Used as-is (e.g., multipart form bodies). Mutually exclusive with Body.
-	Headers  map[string]string
+	RawBody  []byte      // Used as-is (e.g., multipart form bodies). Mutually exclusive with Body and RawBodyReader.
+	// RawBodyReader streams the request body without buffering it in memory.
+	// It is intended for one-shot passthrough requests and is not replayable for retries.
+	RawBodyReader io.Reader
+	Headers       http.Header
 }
 
 // Response represents an HTTP response
 type Response struct {
 	StatusCode int
 	Body       []byte
+}
+
+type requestScope struct {
+	ctx           context.Context
+	startedAt     time.Time
+	requestInfo   RequestInfo
+	halfOpenProbe bool
+}
+
+func (c *Client) beginRequest(ctx context.Context, req Request, stream bool) (requestScope, error) {
+	scope := requestScope{
+		ctx:       ctx,
+		startedAt: time.Now(),
+		requestInfo: RequestInfo{
+			Provider: c.config.ProviderName,
+			Model:    extractModel(req.Body),
+			Endpoint: req.Endpoint,
+			Method:   req.Method,
+			Stream:   stream,
+		},
+	}
+
+	if c.config.Hooks.OnRequestStart != nil {
+		scope.ctx = c.config.Hooks.OnRequestStart(scope.ctx, scope.requestInfo)
+	}
+
+	if c.circuitBreaker != nil {
+		allowed, probe := c.circuitBreaker.acquire()
+		if !allowed {
+			err := core.NewProviderError(c.config.ProviderName, http.StatusServiceUnavailable,
+				"circuit breaker is open - provider temporarily unavailable", nil)
+			c.finishRequest(scope, http.StatusServiceUnavailable, err)
+			return requestScope{}, err
+		}
+		scope.halfOpenProbe = probe
+	}
+
+	return scope, nil
+}
+
+func (c *Client) finishRequest(scope requestScope, statusCode int, err error) {
+	if c.config.Hooks.OnRequestEnd == nil {
+		return
+	}
+	c.config.Hooks.OnRequestEnd(scope.ctx, ResponseInfo{
+		Provider:   c.config.ProviderName,
+		Model:      scope.requestInfo.Model,
+		Endpoint:   scope.requestInfo.Endpoint,
+		StatusCode: statusCode,
+		Duration:   time.Since(scope.startedAt),
+		Stream:     scope.requestInfo.Stream,
+		Error:      err,
+	})
+}
+
+func (c *Client) recordCircuitBreakerCompletion(statusCode int, err error) {
+	if c.circuitBreaker == nil {
+		return
+	}
+	if err != nil {
+		c.circuitBreaker.RecordFailure()
+		return
+	}
+	if c.isRetryable(statusCode) || statusCode >= http.StatusInternalServerError {
+		c.circuitBreaker.RecordFailure()
+		return
+	}
+	c.circuitBreaker.RecordSuccess()
+}
+
+func (c *Client) maxAttempts() int {
+	maxAttempts := c.config.Retry.MaxRetries + 1
+	if maxAttempts < 1 {
+		return 1
+	}
+	return maxAttempts
+}
+
+func (c *Client) waitForRetry(ctx context.Context, attempt int) error {
+	if attempt <= 0 {
+		return nil
+	}
+	backoff := c.calculateBackoff(attempt)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(backoff):
+		return nil
+	}
 }
 
 // Do executes a request with retries and circuit breaking, then unmarshals the response
@@ -204,69 +297,23 @@ func (c *Client) Do(ctx context.Context, req Request, result interface{}) error 
 //
 // The final status code and error in metrics reflect the outcome after all retry attempts.
 func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
-	start := time.Now()
-
-	// Extract model for observability
-	modelName := extractModel(req.Body)
-
-	// Build request info for hooks
-	reqInfo := RequestInfo{
-		Provider: c.config.ProviderName,
-		Model:    modelName,
-		Endpoint: req.Endpoint,
-		Method:   req.Method,
-		Stream:   false,
+	scope, err := c.beginRequest(ctx, req, false)
+	if err != nil {
+		return nil, err
 	}
-
-	// Call OnRequestStart hook (once per logical request, not per retry)
-	if c.config.Hooks.OnRequestStart != nil {
-		ctx = c.config.Hooks.OnRequestStart(ctx, reqInfo)
-	}
-
-	// Helper to call OnRequestEnd hook
-	callEndHook := func(statusCode int, err error) {
-		if c.config.Hooks.OnRequestEnd != nil {
-			c.config.Hooks.OnRequestEnd(ctx, ResponseInfo{
-				Provider:   c.config.ProviderName,
-				Model:      modelName,
-				Endpoint:   req.Endpoint,
-				StatusCode: statusCode,
-				Duration:   time.Since(start),
-				Stream:     false,
-				Error:      err,
-			})
-		}
-	}
-
-	halfOpenProbe := false
-	if c.circuitBreaker != nil {
-		allowed, probe := c.circuitBreaker.acquire()
-		if !allowed {
-			err := core.NewProviderError(c.config.ProviderName, http.StatusServiceUnavailable,
-				"circuit breaker is open - provider temporarily unavailable", nil)
-			callEndHook(http.StatusServiceUnavailable, err)
-			return nil, err
-		}
-		halfOpenProbe = probe
-	}
+	ctx = scope.ctx
 
 	var lastErr error
 	var lastStatusCode int
-	maxAttempts := c.config.Retry.MaxRetries + 1
-	if maxAttempts < 1 {
+	maxAttempts := c.maxAttempts()
+	if req.RawBodyReader != nil {
 		maxAttempts = 1
 	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			// Calculate backoff duration with jitter
-			backoff := c.calculateBackoff(attempt)
-			select {
-			case <-ctx.Done():
-				callEndHook(0, ctx.Err())
-				return nil, ctx.Err()
-			case <-time.After(backoff):
-			}
+		if err := c.waitForRetry(ctx, attempt); err != nil {
+			c.finishRequest(scope, 0, err)
+			return nil, err
 		}
 
 		resp, err := c.doRequest(ctx, req)
@@ -274,11 +321,9 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 			lastErr = err
 			lastStatusCode = extractStatusCode(err)
 			// Only retry on network errors
-			if c.circuitBreaker != nil {
-				c.circuitBreaker.RecordFailure()
-			}
-			if halfOpenProbe {
-				callEndHook(lastStatusCode, lastErr)
+			c.recordCircuitBreakerCompletion(lastStatusCode, lastErr)
+			if scope.halfOpenProbe {
+				c.finishRequest(scope, lastStatusCode, lastErr)
 				return nil, lastErr
 			}
 			continue
@@ -286,13 +331,11 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 
 		// Check for retryable status codes
 		if c.isRetryable(resp.StatusCode) {
-			if c.circuitBreaker != nil {
-				c.circuitBreaker.RecordFailure()
-			}
 			lastErr = core.ParseProviderError(c.config.ProviderName, resp.StatusCode, resp.Body, nil)
 			lastStatusCode = resp.StatusCode
-			if halfOpenProbe {
-				callEndHook(lastStatusCode, lastErr)
+			c.recordCircuitBreakerCompletion(lastStatusCode, nil)
+			if scope.halfOpenProbe {
+				c.finishRequest(scope, lastStatusCode, lastErr)
 				return nil, lastErr
 			}
 			continue
@@ -300,32 +343,25 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 
 		// Non-retryable error
 		if resp.StatusCode != http.StatusOK {
-			if c.circuitBreaker != nil {
-				// Only record failure for server errors
-				if resp.StatusCode >= 500 {
-					c.circuitBreaker.RecordFailure()
-				}
-			}
+			c.recordCircuitBreakerCompletion(resp.StatusCode, nil)
 			err := core.ParseProviderError(c.config.ProviderName, resp.StatusCode, resp.Body, nil)
-			callEndHook(resp.StatusCode, err)
+			c.finishRequest(scope, resp.StatusCode, err)
 			return nil, err
 		}
 
 		// Success
-		if c.circuitBreaker != nil {
-			c.circuitBreaker.RecordSuccess()
-		}
-		callEndHook(resp.StatusCode, nil)
+		c.recordCircuitBreakerCompletion(resp.StatusCode, nil)
+		c.finishRequest(scope, resp.StatusCode, nil)
 		return resp, nil
 	}
 
 	// All retries exhausted
 	if lastErr != nil {
-		callEndHook(lastStatusCode, lastErr)
+		c.finishRequest(scope, lastStatusCode, lastErr)
 		return nil, lastErr
 	}
-	err := core.NewProviderError(c.config.ProviderName, http.StatusBadGateway, "request failed after retries", nil)
-	callEndHook(http.StatusBadGateway, err)
+	err = core.NewProviderError(c.config.ProviderName, http.StatusBadGateway, "request failed after retries", nil)
+	c.finishRequest(scope, http.StatusBadGateway, err)
 	return nil, err
 }
 
@@ -333,80 +369,16 @@ func (c *Client) DoRaw(ctx context.Context, req Request) (*Response, error) {
 // Note: Streaming requests do NOT retry (as partial data may have been sent)
 // Metrics note: Duration is measured from start to stream establishment, not stream close
 func (c *Client) DoStream(ctx context.Context, req Request) (io.ReadCloser, error) {
-	start := time.Now()
-
-	// Extract model for observability
-	modelName := extractModel(req.Body)
-
-	// Build request info for hooks
-	reqInfo := RequestInfo{
-		Provider: c.config.ProviderName,
-		Model:    modelName,
-		Endpoint: req.Endpoint,
-		Method:   req.Method,
-		Stream:   true,
-	}
-
-	// Call OnRequestStart hook
-	if c.config.Hooks.OnRequestStart != nil {
-		ctx = c.config.Hooks.OnRequestStart(ctx, reqInfo)
-	}
-
-	// Check circuit breaker
-	if c.circuitBreaker != nil && !c.circuitBreaker.Allow() {
-		err := core.NewProviderError(c.config.ProviderName, http.StatusServiceUnavailable,
-			"circuit breaker is open - provider temporarily unavailable", nil)
-		// Call OnRequestEnd hook
-		if c.config.Hooks.OnRequestEnd != nil {
-			c.config.Hooks.OnRequestEnd(ctx, ResponseInfo{
-				Provider:   c.config.ProviderName,
-				Model:      modelName,
-				Endpoint:   req.Endpoint,
-				StatusCode: http.StatusServiceUnavailable,
-				Duration:   time.Since(start),
-				Stream:     true,
-				Error:      err,
-			})
-		}
+	scope, err := c.beginRequest(ctx, req, true)
+	if err != nil {
 		return nil, err
 	}
 
-	httpReq, err := c.buildRequest(ctx, req)
+	resp, err := c.doHTTPRequest(scope.ctx, req)
 	if err != nil {
-		// Call OnRequestEnd hook on error
-		if c.config.Hooks.OnRequestEnd != nil {
-			c.config.Hooks.OnRequestEnd(ctx, ResponseInfo{
-				Provider:   c.config.ProviderName,
-				Model:      modelName,
-				Endpoint:   req.Endpoint,
-				StatusCode: extractStatusCode(err),
-				Duration:   time.Since(start),
-				Stream:     true,
-				Error:      err,
-			})
-		}
+		c.recordCircuitBreakerCompletion(extractStatusCode(err), err)
+		c.finishRequest(scope, extractStatusCode(err), err)
 		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		if c.circuitBreaker != nil {
-			c.circuitBreaker.RecordFailure()
-		}
-		providerErr := core.NewProviderError(c.config.ProviderName, http.StatusBadGateway, "failed to send request: "+err.Error(), err)
-		// Call OnRequestEnd hook on error
-		if c.config.Hooks.OnRequestEnd != nil {
-			c.config.Hooks.OnRequestEnd(ctx, ResponseInfo{
-				Provider:   c.config.ProviderName,
-				Model:      modelName,
-				Endpoint:   req.Endpoint,
-				StatusCode: extractStatusCode(providerErr),
-				Duration:   time.Since(start),
-				Stream:     true,
-				Error:      providerErr,
-			})
-		}
-		return nil, providerErr
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -416,45 +388,95 @@ func (c *Client) DoStream(ctx context.Context, req Request) (io.ReadCloser, erro
 		}
 		_ = resp.Body.Close()
 
-		if c.circuitBreaker != nil {
-			if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-				c.circuitBreaker.RecordFailure()
-			}
-		}
+		c.recordCircuitBreakerCompletion(resp.StatusCode, nil)
 		providerErr := core.ParseProviderError(c.config.ProviderName, resp.StatusCode, respBody, nil)
-		// Call OnRequestEnd hook on error
-		if c.config.Hooks.OnRequestEnd != nil {
-			c.config.Hooks.OnRequestEnd(ctx, ResponseInfo{
-				Provider:   c.config.ProviderName,
-				Model:      modelName,
-				Endpoint:   req.Endpoint,
-				StatusCode: resp.StatusCode,
-				Duration:   time.Since(start),
-				Stream:     true,
-				Error:      providerErr,
-			})
-		}
+		c.finishRequest(scope, resp.StatusCode, providerErr)
 		return nil, providerErr
 	}
 
-	if c.circuitBreaker != nil {
-		c.circuitBreaker.RecordSuccess()
-	}
-
-	// Call OnRequestEnd hook on success (stream established)
-	if c.config.Hooks.OnRequestEnd != nil {
-		c.config.Hooks.OnRequestEnd(ctx, ResponseInfo{
-			Provider:   c.config.ProviderName,
-			Model:      modelName,
-			Endpoint:   req.Endpoint,
-			StatusCode: resp.StatusCode,
-			Duration:   time.Since(start),
-			Stream:     true,
-			Error:      nil,
-		})
-	}
-
+	c.recordCircuitBreakerCompletion(resp.StatusCode, nil)
+	c.finishRequest(scope, resp.StatusCode, nil)
 	return resp.Body, nil
+}
+
+func canRetryPassthrough(req Request) bool {
+	if req.RawBodyReader != nil {
+		return false
+	}
+	if hasIdempotencyKey(req.Headers) {
+		return true
+	}
+	switch strings.ToUpper(strings.TrimSpace(req.Method)) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodPut:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasIdempotencyKey(headers http.Header) bool {
+	for key, values := range headers {
+		if http.CanonicalHeaderKey(strings.TrimSpace(key)) != "Idempotency-Key" {
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// DoPassthrough executes a request and returns the raw upstream HTTP response.
+// Unlike DoRaw, it preserves non-200 responses for the caller to proxy unchanged.
+func (c *Client) DoPassthrough(ctx context.Context, req Request) (*http.Response, error) {
+	stream := strings.Contains(strings.ToLower(strings.Join(req.Headers.Values("Accept"), ",")), "text/event-stream")
+	scope, err := c.beginRequest(ctx, req, stream)
+	if err != nil {
+		return nil, err
+	}
+	ctx = scope.ctx
+
+	maxAttempts := 1
+	if canRetryPassthrough(req) {
+		maxAttempts = c.maxAttempts()
+	}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := c.waitForRetry(ctx, attempt); err != nil {
+			c.finishRequest(scope, 0, err)
+			return nil, err
+		}
+
+		resp, err := c.doHTTPRequest(ctx, req)
+		if err != nil {
+			c.recordCircuitBreakerCompletion(extractStatusCode(err), err)
+			if scope.halfOpenProbe || attempt == maxAttempts-1 {
+				c.finishRequest(scope, extractStatusCode(err), err)
+				return nil, err
+			}
+			continue
+		}
+
+		retryable := c.isRetryable(resp.StatusCode)
+		c.recordCircuitBreakerCompletion(resp.StatusCode, nil)
+		if retryable {
+			if scope.halfOpenProbe || attempt == maxAttempts-1 {
+				c.finishRequest(scope, resp.StatusCode, nil)
+				return resp, nil
+			}
+			_ = resp.Body.Close()
+			continue
+		}
+
+		c.finishRequest(scope, resp.StatusCode, nil)
+		return resp, nil
+	}
+
+	err = core.NewProviderError(c.config.ProviderName, http.StatusBadGateway, "request failed after retries", nil)
+	c.finishRequest(scope, http.StatusBadGateway, err)
+	return nil, err
 }
 
 // extractModel attempts to extract the model name from a request body
@@ -492,10 +514,10 @@ func extractStatusCode(err error) int {
 	return 0
 }
 
-// doRequest executes a single HTTP request without retries.
-// Note: Metrics hooks are called at the DoRaw level, not here, to avoid
-// counting each retry attempt as a separate request.
-func (c *Client) doRequest(ctx context.Context, req Request) (*Response, error) {
+// doHTTPRequest executes a single HTTP request without retries and returns the
+// live upstream response. Metrics hooks are called at the logical request
+// level, not here, to avoid counting each attempt separately.
+func (c *Client) doHTTPRequest(ctx context.Context, req Request) (*http.Response, error) {
 	httpReq, err := c.buildRequest(ctx, req)
 	if err != nil {
 		return nil, err
@@ -504,6 +526,17 @@ func (c *Client) doRequest(ctx context.Context, req Request) (*Response, error) 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, core.NewProviderError(c.config.ProviderName, http.StatusBadGateway, "failed to send request: "+err.Error(), err)
+	}
+	return resp, nil
+}
+
+// doRequest executes a single HTTP request without retries.
+// Note: Metrics hooks are called at the DoRaw level, not here, to avoid
+// counting each retry attempt as a separate request.
+func (c *Client) doRequest(ctx context.Context, req Request) (*Response, error) {
+	resp, err := c.doHTTPRequest(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -541,10 +574,22 @@ func (c *Client) buildRequest(ctx context.Context, req Request) (*http.Request, 
 	url := c.getBaseURL() + req.Endpoint
 
 	var bodyReader io.Reader
-	if req.Body != nil && req.RawBody != nil {
-		return nil, core.NewInvalidRequestError("Body and RawBody cannot both be set", nil)
+	bodySources := 0
+	if req.Body != nil {
+		bodySources++
 	}
 	if req.RawBody != nil {
+		bodySources++
+	}
+	if req.RawBodyReader != nil {
+		bodySources++
+	}
+	if bodySources > 1 {
+		return nil, core.NewInvalidRequestError("Body, RawBody, and RawBodyReader are mutually exclusive", nil)
+	}
+	if req.RawBodyReader != nil {
+		bodyReader = req.RawBodyReader
+	} else if req.RawBody != nil {
 		bodyReader = bytes.NewReader(req.RawBody)
 	} else if req.Body != nil {
 		bodyBytes, err := json.Marshal(req.Body)
@@ -570,8 +615,11 @@ func (c *Client) buildRequest(ctx context.Context, req Request) (*http.Request, 
 	}
 
 	// Apply request-specific headers
-	for key, value := range req.Headers {
-		httpReq.Header.Set(key, value)
+	for key, values := range req.Headers {
+		httpReq.Header.Del(key)
+		for _, value := range values {
+			httpReq.Header.Add(key, value)
+		}
 	}
 
 	return httpReq, nil

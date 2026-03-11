@@ -2727,6 +2727,120 @@ func TestBuildAnthropicBatchCreateRequest_PrefixesToolArgumentErrors(t *testing.
 	}
 }
 
+func TestBuildAnthropicBatchCreateRequest_NormalizesFullURLResponsesEndpoint(t *testing.T) {
+	req := &core.BatchRequest{
+		Requests: []core.BatchRequestItem{
+			{
+				CustomID: "resp-1",
+				Method:   http.MethodPost,
+				URL:      "https://provider.example/v1/responses/?trace=1",
+				Body: json.RawMessage(`{
+					"model":"claude-sonnet-4-5-20250929",
+					"input":"Hello"
+				}`),
+			},
+		},
+	}
+
+	anthropicReq, endpointByCustomID, err := buildAnthropicBatchCreateRequest(req)
+	if err != nil {
+		t.Fatalf("buildAnthropicBatchCreateRequest() error = %v", err)
+	}
+	if anthropicReq == nil {
+		t.Fatal("anthropicReq = nil")
+	}
+	if len(anthropicReq.Requests) != 1 {
+		t.Fatalf("len(Requests) = %d, want 1", len(anthropicReq.Requests))
+	}
+	if anthropicReq.Requests[0].Params.Stream {
+		t.Fatal("Params.Stream = true, want false")
+	}
+	if got := endpointByCustomID["resp-1"]; got != "/v1/responses" {
+		t.Fatalf("endpointByCustomID[resp-1] = %q, want /v1/responses", got)
+	}
+}
+
+func TestConvertDecodedBatchItemToAnthropic_ResponsesUsesSharedSemanticTranslator(t *testing.T) {
+	decoded := &core.DecodedBatchItemRequest{
+		Endpoint:  "/v1/responses",
+		Operation: "responses",
+		Request: &core.ResponsesRequest{
+			Model:        "claude-sonnet-4-5-20250929",
+			Instructions: "Be helpful",
+			Input: []core.ResponsesInputElement{
+				{
+					Role:    "user",
+					Content: "Hello",
+				},
+			},
+		},
+	}
+
+	result, err := convertDecodedBatchItemToAnthropic(decoded)
+	if err != nil {
+		t.Fatalf("convertDecodedBatchItemToAnthropic() error = %v", err)
+	}
+	if result.System != "Be helpful" {
+		t.Fatalf("System = %q, want Be helpful", result.System)
+	}
+	if result.Stream {
+		t.Fatal("Stream = true, want false")
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(result.Messages))
+	}
+	if result.Messages[0].Role != "user" {
+		t.Fatalf("Messages[0].Role = %q, want user", result.Messages[0].Role)
+	}
+	if result.Messages[0].Content != "Hello" {
+		t.Fatalf("Messages[0].Content = %#v, want Hello", result.Messages[0].Content)
+	}
+}
+
+func TestConvertDecodedBatchItemToAnthropic_RejectsStreaming(t *testing.T) {
+	decoded := &core.DecodedBatchItemRequest{
+		Endpoint:  "/v1/chat/completions",
+		Operation: "chat_completions",
+		Request: &core.ChatRequest{
+			Model:  "claude-sonnet-4-5-20250929",
+			Stream: true,
+			Messages: []core.Message{
+				{
+					Role:    "user",
+					Content: "Hello",
+				},
+			},
+		},
+	}
+
+	_, err := convertDecodedBatchItemToAnthropic(decoded)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "streaming is not supported for native batch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConvertDecodedBatchItemToAnthropic_RejectsEmbeddings(t *testing.T) {
+	decoded := &core.DecodedBatchItemRequest{
+		Endpoint:  "/v1/embeddings",
+		Operation: "embeddings",
+		Request: &core.EmbeddingRequest{
+			Model: "text-embedding-3-small",
+			Input: "Hello",
+		},
+	}
+
+	_, err := convertDecodedBatchItemToAnthropic(decoded)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "anthropic does not support native embedding batches") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestConvertAnthropicResponseToResponses(t *testing.T) {
 	resp := &anthropicResponse{
 		ID:    "msg_123",
@@ -3869,4 +3983,65 @@ func intPtr(i int) *int {
 
 func float64Ptr(f float64) *float64 {
 	return &f
+}
+
+func TestPassthrough(t *testing.T) {
+	var gotPath string
+	var gotAPIKey string
+	var gotVersion string
+	var gotBody string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad request"}}`))
+	}))
+	defer server.Close()
+
+	provider := NewWithHTTPClient("test-api-key", server.Client(), llmclient.Hooks{})
+	provider.SetBaseURL(server.URL)
+
+	resp, err := provider.Passthrough(context.Background(), &core.PassthroughRequest{
+		Method:   http.MethodPost,
+		Endpoint: "messages",
+		Body:     io.NopCloser(strings.NewReader(`{"model":"claude-sonnet-4-5"}`)),
+		Headers: http.Header{
+			"Content-Type":      {"application/json"},
+			"anthropic-version": {"2024-10-22"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if gotPath != "/messages" {
+		t.Fatalf("path = %q, want /messages", gotPath)
+	}
+	if gotAPIKey != "test-api-key" {
+		t.Fatalf("x-api-key = %q", gotAPIKey)
+	}
+	if gotVersion != "2024-10-22" {
+		t.Fatalf("anthropic-version = %q", gotVersion)
+	}
+	if gotBody != `{"model":"claude-sonnet-4-5"}` {
+		t.Fatalf("body = %q", gotBody)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if string(body) != `{"error":{"message":"bad request"}}` {
+		t.Fatalf("response body = %q", string(body))
+	}
 }

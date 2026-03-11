@@ -18,6 +18,8 @@ type mockRoutableProvider struct {
 	chatReq           *core.ChatRequest
 	responsesReq      *core.ResponsesRequest
 	batchReq          *core.BatchRequest
+	passthroughReq    *core.PassthroughRequest
+	passthroughType   string
 }
 
 func (m *mockRoutableProvider) Supports(model string) bool {
@@ -81,6 +83,18 @@ func (m *mockRoutableProvider) CancelBatch(_ context.Context, _, _ string) (*cor
 
 func (m *mockRoutableProvider) GetBatchResults(_ context.Context, _, _ string) (*core.BatchResultsResponse, error) {
 	return &core.BatchResultsResponse{Object: "list", BatchID: "batch_1"}, nil
+}
+
+func (m *mockRoutableProvider) Passthrough(_ context.Context, providerType string, req *core.PassthroughRequest) (*core.PassthroughResponse, error) {
+	m.passthroughType = providerType
+	m.passthroughReq = req
+	return &core.PassthroughResponse{
+		StatusCode: http.StatusAccepted,
+		Headers: map[string][]string{
+			"Content-Type": {"application/json"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"ok":true}`)),
+	}, nil
 }
 
 // --- Chat adapter integration tests ---
@@ -252,10 +266,10 @@ func TestChatAdaptersCloneToolCalls(t *testing.T) {
 		t.Fatalf("chatToMessages should clone tool calls, got %+v", msgs[0].ToolCalls)
 	}
 
-	chatReq := applyMessagesToChat(&core.ChatRequest{}, msgs)
+	chatMsg := newChatMessageFromGuardrail(msgs[0])
 	msgs[0].ToolCalls[0].Function.Name = "mutated-again"
-	if chatReq.Messages[0].ToolCalls[0].Function.Name != "lookup_weather" {
-		t.Fatalf("applyMessagesToChat should clone tool calls, got %+v", chatReq.Messages[0].ToolCalls)
+	if chatMsg.ToolCalls[0].Function.Name != "lookup_weather" {
+		t.Fatalf("newChatMessageFromGuardrail should clone tool calls, got %+v", chatMsg.ToolCalls)
 	}
 }
 
@@ -287,13 +301,13 @@ func TestChatAdaptersPreserveContentNull(t *testing.T) {
 		t.Fatal("chatToMessages should preserve ContentNull")
 	}
 
-	chatReq := applyMessagesToChat(&core.ChatRequest{}, msgs)
-	if !chatReq.Messages[0].ContentNull {
-		t.Fatal("applyMessagesToChat should preserve ContentNull")
+	chatMsg := newChatMessageFromGuardrail(msgs[0])
+	if !chatMsg.ContentNull {
+		t.Fatal("newChatMessageFromGuardrail should preserve ContentNull")
 	}
 }
 
-func TestApplyMessagesToChat_ClearsContentNullWhenContentPresent(t *testing.T) {
+func TestNewChatMessageFromGuardrail_ClearsContentNullWhenContentPresent(t *testing.T) {
 	msgs := []Message{
 		{
 			Role:        "assistant",
@@ -312,12 +326,12 @@ func TestApplyMessagesToChat_ClearsContentNullWhenContentPresent(t *testing.T) {
 		},
 	}
 
-	chatReq := applyMessagesToChat(&core.ChatRequest{}, msgs)
-	if chatReq.Messages[0].Content != "I'll check that now." {
-		t.Fatalf("Content = %q, want assistant text", chatReq.Messages[0].Content)
+	chatMsg := newChatMessageFromGuardrail(msgs[0])
+	if chatMsg.Content != "I'll check that now." {
+		t.Fatalf("Content = %q, want assistant text", chatMsg.Content)
 	}
-	if chatReq.Messages[0].ContentNull {
-		t.Fatal("applyMessagesToChat should clear ContentNull when Content is present")
+	if chatMsg.ContentNull {
+		t.Fatal("newChatMessageFromGuardrail should clear ContentNull when Content is present")
 	}
 }
 
@@ -359,9 +373,78 @@ func TestGuardedProvider_ChatCompletion_AppliesGuardrailsToTextOnlyContentArray(
 	if got := core.ExtractTextContent(inner.chatReq.Messages[1].Content); got != "hello" {
 		t.Fatalf("user content = %q, want hello", got)
 	}
-
-	parts, ok := req.Messages[0].Content.([]core.ContentPart)
+	parts, ok := inner.chatReq.Messages[1].Content.([]core.ContentPart)
 	if !ok || len(parts) != 1 || parts[0].Text != "hello" {
+		t.Fatalf("expected text-only content array to be preserved, got %#v", inner.chatReq.Messages[1].Content)
+	}
+
+	originalParts, ok := req.Messages[0].Content.([]core.ContentPart)
+	if !ok || len(originalParts) != 1 || originalParts[0].Text != "hello" {
+		t.Fatalf("original request content mutated: %#v", req.Messages[0].Content)
+	}
+}
+
+func TestGuardedProvider_ChatCompletion_RewritesStructuredTextContentWithoutDroppingOpaqueFields(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	pipeline.Add(&mockGuardrail{
+		name: "rewrite-user-text",
+		processFn: func(_ context.Context, msgs []Message) ([]Message, error) {
+			out := make([]Message, len(msgs))
+			copy(out, msgs)
+			for i := range out {
+				if out[i].Role == "user" {
+					out[i].Content = out[i].Content + " [rewritten]"
+				}
+			}
+			return out, nil
+		},
+	}, 0)
+
+	guarded := NewGuardedProvider(inner, pipeline)
+
+	var req core.ChatRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-4",
+		"messages":[
+			{
+				"role":"user",
+				"name":"alice",
+				"x_meta":{"tier":"gold"},
+				"content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]
+			}
+		]
+	}`), &req); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := guarded.ChatCompletion(context.Background(), &req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if inner.chatReq == nil || len(inner.chatReq.Messages) != 1 {
+		t.Fatalf("expected rewritten request, got %+v", inner.chatReq)
+	}
+	if inner.chatReq.Messages[0].ExtraFields["name"] == nil {
+		t.Fatalf("message name missing from ExtraFields: %+v", inner.chatReq.Messages[0].ExtraFields)
+	}
+	if inner.chatReq.Messages[0].ExtraFields["x_meta"] == nil {
+		t.Fatalf("message x_meta missing from ExtraFields: %+v", inner.chatReq.Messages[0].ExtraFields)
+	}
+	parts, ok := inner.chatReq.Messages[0].Content.([]core.ContentPart)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("expected structured content to be preserved, got %#v", inner.chatReq.Messages[0].Content)
+	}
+	if parts[0].Text != "hello [rewritten]" {
+		t.Fatalf("parts[0].Text = %q, want rewritten text", parts[0].Text)
+	}
+	if parts[0].ExtraFields["cache_control"] == nil {
+		t.Fatalf("cache_control missing from content part extra fields: %+v", parts[0].ExtraFields)
+	}
+
+	originalParts, ok := req.Messages[0].Content.([]core.ContentPart)
+	if !ok || len(originalParts) != 1 || originalParts[0].Text != "hello" {
 		t.Fatalf("original request content mutated: %#v", req.Messages[0].Content)
 	}
 }
@@ -586,7 +669,7 @@ func TestGuardedProvider_ChatCompletion_RejectsUnsupportedContent(t *testing.T) 
 	}
 }
 
-func TestApplySystemMessagesToMultimodalChat_PreservesOriginalEnvelope(t *testing.T) {
+func TestApplyMessagesToChatPreservingEnvelope_PreservesOriginalEnvelope(t *testing.T) {
 	req := &core.ChatRequest{
 		Messages: []core.Message{
 			{
@@ -609,11 +692,15 @@ func TestApplySystemMessagesToMultimodalChat_PreservesOriginalEnvelope(t *testin
 		},
 	}
 
-	result, err := applySystemMessagesToMultimodalChat(req, []Message{
-		{Role: "assistant", Content: "describe [rewritten]"},
+	result, err := applyMessagesToChatPreservingEnvelope(req, []Message{
+		{
+			Role:      "assistant",
+			Content:   "describe [rewritten]",
+			ToolCalls: cloneToolCalls(req.Messages[0].ToolCalls),
+		},
 	})
 	if err != nil {
-		t.Fatalf("applySystemMessagesToMultimodalChat() error = %v", err)
+		t.Fatalf("applyMessagesToChatPreservingEnvelope() error = %v", err)
 	}
 	if len(result.Messages) != 1 {
 		t.Fatalf("len(Messages) = %d, want 1", len(result.Messages))
@@ -630,7 +717,7 @@ func TestApplySystemMessagesToMultimodalChat_PreservesOriginalEnvelope(t *testin
 	}
 }
 
-func TestApplySystemMessagesToMultimodalChat_RejectsDroppedMessages(t *testing.T) {
+func TestApplyMessagesToChatPreservingEnvelope_RejectsDroppedMessages(t *testing.T) {
 	req := &core.ChatRequest{
 		Messages: []core.Message{
 			{
@@ -644,7 +731,7 @@ func TestApplySystemMessagesToMultimodalChat_RejectsDroppedMessages(t *testing.T
 		},
 	}
 
-	_, err := applySystemMessagesToMultimodalChat(req, []Message{
+	_, err := applyMessagesToChatPreservingEnvelope(req, []Message{
 		{Role: "user", Content: "keep [rewritten]"},
 	})
 	if err == nil {
@@ -652,7 +739,121 @@ func TestApplySystemMessagesToMultimodalChat_RejectsDroppedMessages(t *testing.T
 	}
 }
 
-func TestApplySystemMessagesToMultimodalChat_RejectsShiftedNonSystemTurns(t *testing.T) {
+func TestApplyMessagesToChatPreservingEnvelope_ClearsToolMetadataWhenGuardedMessageRemovesIt(t *testing.T) {
+	req := &core.ChatRequest{
+		Messages: []core.Message{
+			{
+				Role: "assistant",
+				Content: []core.ContentPart{
+					{Type: "text", Text: "before"},
+				},
+				ToolCalls: []core.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: core.FunctionCall{
+							Name:      "lookup",
+							Arguments: "{}",
+						},
+					},
+				},
+				ToolCallID: "call_1",
+			},
+		},
+	}
+
+	result, err := applyMessagesToChatPreservingEnvelope(req, []Message{
+		{Role: "assistant", Content: "after"},
+	})
+	if err != nil {
+		t.Fatalf("applyMessagesToChatPreservingEnvelope() error = %v", err)
+	}
+	if len(result.Messages) != 1 {
+		t.Fatalf("len(Messages) = %d, want 1", len(result.Messages))
+	}
+	if len(result.Messages[0].ToolCalls) != 0 {
+		t.Fatalf("ToolCalls = %+v, want empty", result.Messages[0].ToolCalls)
+	}
+	if result.Messages[0].ToolCallID != "" {
+		t.Fatalf("ToolCallID = %q, want empty", result.Messages[0].ToolCallID)
+	}
+}
+
+func TestApplyMessagesToChatPreservingEnvelope_TailMatchesExistingSystemMessages(t *testing.T) {
+	req := &core.ChatRequest{
+		Messages: []core.Message{
+			{
+				Role:        "system",
+				Content:     "original system",
+				ExtraFields: map[string]json.RawMessage{"x_system": json.RawMessage(`true`)},
+			},
+			{Role: "user", Content: "hello"},
+		},
+	}
+
+	result, err := applyMessagesToChatPreservingEnvelope(req, []Message{
+		{Role: "system", Content: "prepended system"},
+		{Role: "system", Content: "rewritten original system"},
+		{Role: "user", Content: "hello"},
+	})
+	if err != nil {
+		t.Fatalf("applyMessagesToChatPreservingEnvelope() error = %v", err)
+	}
+	if len(result.Messages) != 3 {
+		t.Fatalf("len(Messages) = %d, want 3", len(result.Messages))
+	}
+	if result.Messages[0].ExtraFields["x_system"] != nil {
+		t.Fatalf("prepended system message should not inherit original extras: %+v", result.Messages[0].ExtraFields)
+	}
+	if result.Messages[1].ExtraFields["x_system"] == nil {
+		t.Fatalf("tail-matched system message lost original extras: %+v", result.Messages[1].ExtraFields)
+	}
+}
+
+func TestPatchChatMessagesJSON_TailMatchesExistingSystemMessages(t *testing.T) {
+	originalRaw := json.RawMessage(`[
+		{"role":"system","content":"original system","x_system":true},
+		{"role":"user","content":"hello"}
+	]`)
+	original := []core.Message{
+		{
+			Role:        "system",
+			Content:     "original system",
+			ExtraFields: map[string]json.RawMessage{"x_system": json.RawMessage(`true`)},
+		},
+		{Role: "user", Content: "hello"},
+	}
+	modified := []core.Message{
+		{Role: "system", Content: "prepended system"},
+		{
+			Role:        "system",
+			Content:     "rewritten original system",
+			ExtraFields: map[string]json.RawMessage{"x_system": json.RawMessage(`true`)},
+		},
+		{Role: "user", Content: "hello"},
+	}
+
+	patched, err := patchChatMessagesJSON(originalRaw, original, modified)
+	if err != nil {
+		t.Fatalf("patchChatMessagesJSON() error = %v", err)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(patched, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal patched payload: %v", err)
+	}
+	if len(decoded) != 3 {
+		t.Fatalf("len(decoded) = %d, want 3", len(decoded))
+	}
+	if decoded[0]["x_system"] != nil {
+		t.Fatalf("prepended system message should not inherit original extras: %#v", decoded[0])
+	}
+	if decoded[1]["x_system"] != true {
+		t.Fatalf("tail-matched system message lost original extras: %#v", decoded[1])
+	}
+}
+
+func TestApplyMessagesToChatPreservingEnvelope_RejectsShiftedNonSystemTurns(t *testing.T) {
 	req := &core.ChatRequest{
 		Messages: []core.Message{
 			{
@@ -673,7 +874,7 @@ func TestApplySystemMessagesToMultimodalChat_RejectsShiftedNonSystemTurns(t *tes
 		},
 	}
 
-	_, err := applySystemMessagesToMultimodalChat(req, []Message{
+	_, err := applyMessagesToChatPreservingEnvelope(req, []Message{
 		{Role: "tool", Content: "{}"},
 		{Role: "assistant", Content: ""},
 	})
@@ -682,14 +883,14 @@ func TestApplySystemMessagesToMultimodalChat_RejectsShiftedNonSystemTurns(t *tes
 	}
 }
 
-func TestMergeMultimodalContentWithTextRewrite_MergesMultipleTextParts(t *testing.T) {
-	merged, err := mergeMultimodalContentWithTextRewrite([]core.ContentPart{
+func TestRewriteStructuredContentWithTextRewrite_MergesMultipleTextParts(t *testing.T) {
+	merged, err := rewriteStructuredContentWithTextRewrite([]core.ContentPart{
 		{Type: "text", Text: "before"},
 		{Type: "image_url", ImageURL: &core.ImageURLContent{URL: "https://example.com/image.png"}},
 		{Type: "text", Text: "after"},
 	}, "rewritten")
 	if err != nil {
-		t.Fatalf("mergeMultimodalContentWithTextRewrite() error = %v", err)
+		t.Fatalf("rewriteStructuredContentWithTextRewrite() error = %v", err)
 	}
 	if got := core.ExtractTextContent(merged); got != "rewritten" {
 		t.Fatalf("ExtractTextContent(merged) = %q, want rewritten", got)
@@ -870,6 +1071,36 @@ func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled(t *testing.T) {
 	}
 }
 
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_SkipsEmbeddingsItems(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	g, _ := NewSystemPromptGuardrail("test", SystemPromptInject, "guardrail system")
+	pipeline.Add(g, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/embeddings",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "/v1/embeddings",
+				Body:   json.RawMessage(`{"model":"text-embedding-3-small","input":"hello"}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+	if string(inner.batchReq.Requests[0].Body) != `{"model":"text-embedding-3-small","input":"hello"}` {
+		t.Fatalf("expected embeddings batch item to remain unchanged, got %s", inner.batchReq.Requests[0].Body)
+	}
+}
+
 func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_TextOnlyContentArray(t *testing.T) {
 	inner := &mockRoutableProvider{}
 	pipeline := NewPipeline()
@@ -905,6 +1136,375 @@ func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_TextOnlyContentArray
 	}
 	if got := core.ExtractTextContent(chatReq.Messages[1].Content); got != "hello" {
 		t.Fatalf("batch user content = %q, want hello", got)
+	}
+	parts, ok := chatReq.Messages[1].Content.([]core.ContentPart)
+	if !ok || len(parts) != 1 || parts[0].Text != "hello" {
+		t.Fatalf("expected batch structured content to be preserved, got %#v", chatReq.Messages[1].Content)
+	}
+}
+
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_RewritesStructuredTextContentWithoutDroppingOpaqueFields(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	pipeline.Add(&mockGuardrail{
+		name: "rewrite-user-text",
+		processFn: func(_ context.Context, msgs []Message) ([]Message, error) {
+			out := make([]Message, len(msgs))
+			copy(out, msgs)
+			for i := range out {
+				if out[i].Role == "user" {
+					out[i].Content = out[i].Content + " [rewritten]"
+				}
+			}
+			return out, nil
+		},
+	}, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/chat/completions",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "/v1/chat/completions",
+				Body: json.RawMessage(`{
+					"model":"gpt-4",
+					"messages":[
+						{
+							"role":"user",
+							"name":"alice",
+							"x_meta":{"tier":"gold"},
+							"content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]
+						}
+					]
+				}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(inner.batchReq.Requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages = %#v, want 1 entry", body["messages"])
+	}
+	userMsg, ok := messages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("messages[0] = %#v, want object", messages[0])
+	}
+	if userMsg["name"] != "alice" {
+		t.Fatalf("messages[0].name = %#v, want alice", userMsg["name"])
+	}
+	xMeta, ok := userMsg["x_meta"].(map[string]any)
+	if !ok || xMeta["tier"] != "gold" {
+		t.Fatalf("messages[0].x_meta = %#v, want preserved nested metadata", userMsg["x_meta"])
+	}
+	content, ok := userMsg["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("messages[0].content = %#v, want preserved content array", userMsg["content"])
+	}
+	part, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatalf("messages[0].content[0] = %#v, want object", content[0])
+	}
+	if part["text"] != "hello [rewritten]" {
+		t.Fatalf("messages[0].content[0].text = %#v, want rewritten text", part["text"])
+	}
+	if part["cache_control"] == nil {
+		t.Fatalf("messages[0].content[0].cache_control = %#v, want preserved metadata", part["cache_control"])
+	}
+}
+
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_PreservesOpaqueChatFields(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	g, _ := NewSystemPromptGuardrail("test", SystemPromptInject, "guardrail system")
+	pipeline.Add(g, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/chat/completions",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "/v1/chat/completions",
+				Body: json.RawMessage(`{
+					"model":"gpt-4",
+					"messages":[{"role":"user","content":"hello","name":"alice","x_meta":{"tier":"gold"}}],
+					"response_format":{"type":"json_schema","json_schema":{"name":"reply"}}
+				}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(inner.batchReq.Requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+
+	responseFormat, ok := body["response_format"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_format = %#v, want object", body["response_format"])
+	}
+	if responseFormat["type"] != "json_schema" {
+		t.Fatalf("response_format.type = %#v, want json_schema", responseFormat["type"])
+	}
+
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages = %#v, want 2 entries", body["messages"])
+	}
+	systemMsg, ok := messages[0].(map[string]any)
+	if !ok || systemMsg["role"] != "system" {
+		t.Fatalf("messages[0] = %#v, want injected system message", messages[0])
+	}
+	userMsg, ok := messages[1].(map[string]any)
+	if !ok {
+		t.Fatalf("messages[1] = %#v, want object", messages[1])
+	}
+	if userMsg["name"] != "alice" {
+		t.Fatalf("messages[1].name = %#v, want alice", userMsg["name"])
+	}
+	xMeta, ok := userMsg["x_meta"].(map[string]any)
+	if !ok || xMeta["tier"] != "gold" {
+		t.Fatalf("messages[1].x_meta = %#v, want preserved nested metadata", userMsg["x_meta"])
+	}
+	if userMsg["content"] != "hello" {
+		t.Fatalf("messages[1].content = %#v, want hello", userMsg["content"])
+	}
+}
+
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_RewritesChatContentWithoutDroppingOpaqueMessageFields(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	pipeline.Add(&mockGuardrail{
+		name: "rewrite-user-text",
+		processFn: func(_ context.Context, msgs []Message) ([]Message, error) {
+			out := make([]Message, len(msgs))
+			copy(out, msgs)
+			for i := range out {
+				if out[i].Role == "user" {
+					out[i].Content = out[i].Content + " [rewritten]"
+				}
+			}
+			return out, nil
+		},
+	}, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/chat/completions",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "/v1/chat/completions",
+				Body: json.RawMessage(`{
+					"model":"gpt-4",
+					"messages":[{"role":"user","content":"hello","name":"alice","x_meta":{"tier":"gold"}}]
+				}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(inner.batchReq.Requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 1 {
+		t.Fatalf("messages = %#v, want 1 entry", body["messages"])
+	}
+	userMsg, ok := messages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("messages[0] = %#v, want object", messages[0])
+	}
+	if userMsg["content"] != "hello [rewritten]" {
+		t.Fatalf("messages[0].content = %#v, want rewritten text", userMsg["content"])
+	}
+	if userMsg["name"] != "alice" {
+		t.Fatalf("messages[0].name = %#v, want alice", userMsg["name"])
+	}
+	xMeta, ok := userMsg["x_meta"].(map[string]any)
+	if !ok || xMeta["tier"] != "gold" {
+		t.Fatalf("messages[0].x_meta = %#v, want preserved nested metadata", userMsg["x_meta"])
+	}
+}
+
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_PreservesOpaqueResponsesFields(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	g, _ := NewSystemPromptGuardrail("test", SystemPromptOverride, "guardrail instructions")
+	pipeline.Add(g, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/responses",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "/v1/responses",
+				Body: json.RawMessage(`{
+					"model":"gpt-4",
+					"instructions":"original",
+					"input":[{"type":"message","role":"user","content":"hello","x_trace":{"id":"trace-1"}}],
+					"response_format":{"type":"json_schema","json_schema":{"name":"reply"}}
+				}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(inner.batchReq.Requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+
+	if body["instructions"] != "guardrail instructions" {
+		t.Fatalf("instructions = %#v, want guarded text", body["instructions"])
+	}
+	responseFormat, ok := body["response_format"].(map[string]any)
+	if !ok || responseFormat["type"] != "json_schema" {
+		t.Fatalf("response_format = %#v, want preserved json_schema object", body["response_format"])
+	}
+
+	input, ok := body["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v, want 1 entry", body["input"])
+	}
+	inputMsg, ok := input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("input[0] = %#v, want object", input[0])
+	}
+	xTrace, ok := inputMsg["x_trace"].(map[string]any)
+	if !ok || xTrace["id"] != "trace-1" {
+		t.Fatalf("input[0].x_trace = %#v, want preserved nested metadata", inputMsg["x_trace"])
+	}
+}
+
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_NormalizesFullURLResponsesEndpoint(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	g, _ := NewSystemPromptGuardrail("test", SystemPromptOverride, "guardrail instructions")
+	pipeline.Add(g, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/chat/completions",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "https://provider.example/v1/responses/?trace=1",
+				Body: json.RawMessage(`{
+					"model":"gpt-4",
+					"instructions":"original",
+					"input":"hello"
+				}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(inner.batchReq.Requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["instructions"] != "guardrail instructions" {
+		t.Fatalf("instructions = %#v, want guarded text", body["instructions"])
+	}
+}
+
+func TestGuardedProvider_CreateBatch_BatchGuardrailsEnabled_PreservesSystemMessageOpaqueFields(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	g, _ := NewSystemPromptGuardrail("test", SystemPromptDecorator, "prefix")
+	pipeline.Add(g, 0)
+	guarded := NewGuardedProviderWithOptions(inner, pipeline, Options{EnableForBatchProcessing: true})
+
+	req := &core.BatchRequest{
+		Endpoint: "/v1/chat/completions",
+		Requests: []core.BatchRequestItem{
+			{
+				Method: http.MethodPost,
+				URL:    "/v1/chat/completions",
+				Body: json.RawMessage(`{
+					"model":"gpt-4",
+					"messages":[
+						{"role":"system","content":"original","x_meta":{"tier":"gold"}},
+						{"role":"user","content":"hello"}
+					]
+				}`),
+			},
+		},
+	}
+
+	_, err := guarded.CreateBatch(context.Background(), "mock", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.batchReq == nil || len(inner.batchReq.Requests) != 1 {
+		t.Fatalf("expected delegated batch request")
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(inner.batchReq.Requests[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages = %#v, want 2 entries", body["messages"])
+	}
+	systemMsg, ok := messages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("messages[0] = %#v, want object", messages[0])
+	}
+	if systemMsg["content"] != "prefix\noriginal" {
+		t.Fatalf("messages[0].content = %#v, want decorated content", systemMsg["content"])
+	}
+	xMeta, ok := systemMsg["x_meta"].(map[string]any)
+	if !ok || xMeta["tier"] != "gold" {
+		t.Fatalf("messages[0].x_meta = %#v, want preserved metadata", systemMsg["x_meta"])
 	}
 }
 
@@ -1057,6 +1657,55 @@ func TestGuardedProvider_DelegatesGetProviderType(t *testing.T) {
 	}
 }
 
+func TestGuardedProvider_ModelCount_UnknownWhenInnerDoesNotExposeCount(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	guarded := NewGuardedProvider(inner, pipeline)
+
+	if got := guarded.ModelCount(); got != -1 {
+		t.Fatalf("ModelCount() = %d, want -1 for unknown count", got)
+	}
+}
+
+func TestGuardedProvider_Passthrough_Delegates(t *testing.T) {
+	inner := &mockRoutableProvider{}
+	pipeline := NewPipeline()
+	guarded := NewGuardedProvider(inner, pipeline)
+
+	resp, err := guarded.Passthrough(context.Background(), "openai", &core.PassthroughRequest{
+		Method:   http.MethodPost,
+		Endpoint: "responses",
+		Body:     io.NopCloser(strings.NewReader(`{"foo":"bar"}`)),
+		Headers: http.Header{
+			"Content-Type": {"application/json"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if inner.passthroughType != "openai" {
+		t.Fatalf("providerType = %q, want openai", inner.passthroughType)
+	}
+	if inner.passthroughReq == nil {
+		t.Fatal("passthroughReq = nil")
+	}
+	if inner.passthroughReq.Endpoint != "responses" {
+		t.Fatalf("Endpoint = %q, want responses", inner.passthroughReq.Endpoint)
+	}
+	body, readErr := io.ReadAll(inner.passthroughReq.Body)
+	if readErr != nil {
+		t.Fatalf("failed to read passthrough body: %v", readErr)
+	}
+	if got := string(body); got != `{"foo":"bar"}` {
+		t.Fatalf("Body = %q, want request body", got)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusAccepted)
+	}
+}
+
 func TestGuardedProvider_GuardrailError_BlocksRequest(t *testing.T) {
 	inner := &mockRoutableProvider{}
 	pipeline := NewPipeline()
@@ -1196,7 +1845,7 @@ func TestApplyMessagesToResponses_SystemToInstructions(t *testing.T) {
 	}
 }
 
-func TestMergeMultimodalContentWithTextRewrite_RejectsExcessiveContentParts(t *testing.T) {
+func TestRewriteStructuredContentWithTextRewrite_RejectsExcessiveContentParts(t *testing.T) {
 	parts := make([]core.ContentPart, 1_000_000)
 	for i := range parts {
 		parts[i] = core.ContentPart{
@@ -1204,7 +1853,7 @@ func TestMergeMultimodalContentWithTextRewrite_RejectsExcessiveContentParts(t *t
 			ImageURL: &core.ImageURLContent{URL: "https://example.com/img.png"},
 		}
 	}
-	_, err := mergeMultimodalContentWithTextRewrite(parts, "rewritten")
+	_, err := rewriteStructuredContentWithTextRewrite(parts, "rewritten")
 	if err == nil {
 		t.Fatal("expected error for excessive content parts, got nil")
 	}

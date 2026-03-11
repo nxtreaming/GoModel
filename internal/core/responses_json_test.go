@@ -231,6 +231,164 @@ func TestResponsesRequestMarshalJSON_PreservesTypedInputElementContent(t *testin
 	}
 }
 
+func TestResponsesRequestJSON_PreservesUnknownNestedFields(t *testing.T) {
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-4o-mini",
+		"input":[
+			{
+				"type":"message",
+				"role":"user",
+				"content":"hello",
+				"x_trace":{"id":"trace-1"}
+			},
+			{
+				"type":"function_call",
+				"call_id":"call_123",
+				"name":"lookup_weather",
+				"arguments":"{}",
+				"strict":true
+			}
+		]
+	}`), &req); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	input, ok := req.Input.([]ResponsesInputElement)
+	if !ok || len(input) != 2 {
+		t.Fatalf("Input = %#v, want []ResponsesInputElement len=2", req.Input)
+	}
+	if input[0].ExtraFields["x_trace"] == nil {
+		t.Fatalf("input[0].x_trace missing from ExtraFields: %+v", input[0].ExtraFields)
+	}
+	if input[1].ExtraFields["strict"] == nil {
+		t.Fatalf("input[1].strict missing from ExtraFields: %+v", input[1].ExtraFields)
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	decodedInput, ok := decoded["input"].([]any)
+	if !ok || len(decodedInput) != 2 {
+		t.Fatalf("decoded input = %#v, want []any len=2", decoded["input"])
+	}
+	firstInput, ok := decodedInput[0].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded input[0] = %#v, want object", decodedInput[0])
+	}
+	if _, ok := firstInput["x_trace"].(map[string]any); !ok {
+		t.Fatalf("decoded input[0].x_trace = %#v, want object", firstInput["x_trace"])
+	}
+	secondInput, ok := decodedInput[1].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded input[1] = %#v, want object", decodedInput[1])
+	}
+	if secondInput["strict"] != true {
+		t.Fatalf("decoded input[1].strict = %#v, want true", secondInput["strict"])
+	}
+}
+
+func TestResponsesRequestJSON_PreservesVariantSpecificUnknownFields(t *testing.T) {
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-4o-mini",
+		"input":[
+			{
+				"type":"message",
+				"id":"msg_123",
+				"role":"user",
+				"content":"hello"
+			},
+			{
+				"type":"function_call_output",
+				"call_id":"call_123",
+				"name":"still-extra",
+				"output":"{}"
+			}
+		]
+	}`), &req); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	input, ok := req.Input.([]ResponsesInputElement)
+	if !ok || len(input) != 2 {
+		t.Fatalf("Input = %#v, want []ResponsesInputElement len=2", req.Input)
+	}
+	if input[0].ExtraFields["id"] == nil {
+		t.Fatalf("message id missing from ExtraFields: %+v", input[0].ExtraFields)
+	}
+	if input[1].ExtraFields["name"] == nil {
+		t.Fatalf("function_call_output name missing from ExtraFields: %+v", input[1].ExtraFields)
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(roundTrip) error = %v", err)
+	}
+	items := decoded["input"].([]any)
+	message := items[0].(map[string]any)
+	if message["id"] != "msg_123" {
+		t.Fatalf("message.id = %#v, want msg_123", message["id"])
+	}
+	callOutput := items[1].(map[string]any)
+	if callOutput["name"] != "still-extra" {
+		t.Fatalf("function_call_output.name = %#v, want still-extra", callOutput["name"])
+	}
+}
+
+func TestResponsesRequestJSON_PreservesUnknownFields(t *testing.T) {
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-5-mini",
+		"input":"hello",
+		"text":{
+			"format":{
+				"type":"json_schema",
+				"name":"answer"
+			}
+		}
+	}`), &req); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if req.ExtraFields["text"] == nil {
+		t.Fatalf("text missing from ExtraFields: %+v", req.ExtraFields)
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	textField, ok := decoded["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded text = %#v, want object", decoded["text"])
+	}
+	formatField, ok := textField["format"].(map[string]any)
+	if !ok {
+		t.Fatalf("decoded text.format = %#v, want object", textField["format"])
+	}
+	if formatField["type"] != "json_schema" {
+		t.Fatalf("decoded text.format.type = %#v, want json_schema", formatField["type"])
+	}
+}
+
 func TestResponsesInputElementMarshalJSON_FunctionCall(t *testing.T) {
 	elem := ResponsesInputElement{
 		Type:      "function_call",

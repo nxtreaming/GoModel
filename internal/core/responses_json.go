@@ -27,6 +27,25 @@ func (r *ResponsesRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	extraFields, err := extractUnknownJSONFields(data,
+		"model",
+		"provider",
+		"input",
+		"instructions",
+		"tools",
+		"tool_choice",
+		"parallel_tool_calls",
+		"temperature",
+		"max_output_tokens",
+		"stream",
+		"stream_options",
+		"metadata",
+		"reasoning",
+	)
+	if err != nil {
+		return err
+	}
+
 	var input any
 	trimmed := bytes.TrimSpace(raw.Input)
 	if len(trimmed) != 0 && !bytes.Equal(trimmed, []byte("null")) {
@@ -56,12 +75,13 @@ func (r *ResponsesRequest) UnmarshalJSON(data []byte) error {
 	r.StreamOptions = raw.StreamOptions
 	r.Metadata = raw.Metadata
 	r.Reasoning = raw.Reasoning
+	r.ExtraFields = extraFields
 	return nil
 }
 
 // MarshalJSON preserves dynamic input payloads while supporting Swagger-only schema fields.
 func (r ResponsesRequest) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+	return marshalWithUnknownJSONFields(struct {
 		Model             string            `json:"model"`
 		Provider          string            `json:"provider,omitempty"`
 		Input             any               `json:"input"`
@@ -89,7 +109,7 @@ func (r ResponsesRequest) MarshalJSON() ([]byte, error) {
 		StreamOptions:     r.StreamOptions,
 		Metadata:          r.Metadata,
 		Reasoning:         r.Reasoning,
-	})
+	}, r.ExtraFields)
 }
 
 // UnmarshalJSON deserializes a ResponsesInputElement, switching on the "type"
@@ -147,6 +167,22 @@ func (e *ResponsesInputElement) UnmarshalJSON(data []byte) error {
 			}
 		}
 	}
+
+	knownFields := []string{"type"}
+	switch e.Type {
+	case "function_call":
+		knownFields = append(knownFields, "call_id", "id", "name", "arguments", "status")
+	case "function_call_output":
+		knownFields = append(knownFields, "call_id", "status", "output")
+	default:
+		knownFields = append(knownFields, "role", "status", "content")
+	}
+
+	extraFields, err := extractUnknownJSONFields(data, knownFields...)
+	if err != nil {
+		return err
+	}
+	e.ExtraFields = extraFields
 	return nil
 }
 
@@ -155,7 +191,7 @@ func (e *ResponsesInputElement) UnmarshalJSON(data []byte) error {
 func (e ResponsesInputElement) MarshalJSON() ([]byte, error) {
 	switch e.Type {
 	case "function_call":
-		return json.Marshal(struct {
+		return marshalWithUnknownJSONFields(struct {
 			Type      string `json:"type"`
 			CallID    string `json:"call_id,omitempty"`
 			Name      string `json:"name,omitempty"`
@@ -167,9 +203,9 @@ func (e ResponsesInputElement) MarshalJSON() ([]byte, error) {
 			Name:      e.Name,
 			Arguments: e.Arguments,
 			Status:    e.Status,
-		})
+		}, e.ExtraFields)
 	case "function_call_output":
-		return json.Marshal(struct {
+		return marshalWithUnknownJSONFields(struct {
 			Type   string `json:"type"`
 			CallID string `json:"call_id,omitempty"`
 			Output string `json:"output,omitempty"`
@@ -179,7 +215,7 @@ func (e ResponsesInputElement) MarshalJSON() ([]byte, error) {
 			CallID: e.CallID,
 			Output: e.Output,
 			Status: e.Status,
-		})
+		}, e.ExtraFields)
 	default: // message
 		type msg struct {
 			Type    string `json:"type,omitempty"`
@@ -187,12 +223,12 @@ func (e ResponsesInputElement) MarshalJSON() ([]byte, error) {
 			Content any    `json:"content"`
 			Status  string `json:"status,omitempty"`
 		}
-		return json.Marshal(msg{
+		return marshalWithUnknownJSONFields(msg{
 			Type:    e.Type,
 			Role:    e.Role,
 			Content: e.Content,
 			Status:  e.Status,
-		})
+		}, e.ExtraFields)
 	}
 }
 

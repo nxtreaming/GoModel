@@ -14,6 +14,45 @@ import (
 	"gomodel/internal/llmclient"
 )
 
+func validatedOpenAICompatibleFileID(client *llmclient.Client, id string) (string, error) {
+	if client == nil {
+		return "", core.NewProviderError("openai_compatible", http.StatusBadGateway, "provider client is not configured", nil)
+	}
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return "", core.NewInvalidRequestError("file id is required", nil)
+	}
+	return trimmed, nil
+}
+
+func doOpenAICompatibleFileIDRequest[T any](ctx context.Context, client *llmclient.Client, method, id string, defaultObject string) (*T, error) {
+	trimmedID, err := validatedOpenAICompatibleFileID(client, id)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp T
+	if err := client.Do(ctx, llmclient.Request{
+		Method:   method,
+		Endpoint: "/files/" + url.PathEscape(trimmedID),
+	}, &resp); err != nil {
+		return nil, err
+	}
+	switch typed := any(&resp).(type) {
+	case *core.FileObject:
+		typed.ID = trimmedID
+		if typed.Object == "" {
+			typed.Object = defaultObject
+		}
+	case *core.FileDeleteResponse:
+		typed.ID = trimmedID
+		if typed.Object == "" {
+			typed.Object = defaultObject
+		}
+	}
+	return &resp, nil
+}
+
 // CreateOpenAICompatibleFile uploads a file using the OpenAI-compatible multipart files API.
 func CreateOpenAICompatibleFile(ctx context.Context, client *llmclient.Client, req *core.FileCreateRequest) (*core.FileObject, error) {
 	if client == nil {
@@ -55,8 +94,8 @@ func CreateOpenAICompatibleFile(ctx context.Context, client *llmclient.Client, r
 		Method:   http.MethodPost,
 		Endpoint: "/files",
 		RawBody:  buf.Bytes(),
-		Headers: map[string]string{
-			"Content-Type": writer.FormDataContentType(),
+		Headers: http.Header{
+			"Content-Type": {writer.FormDataContentType()},
 		},
 	}, &fileObj); err != nil {
 		return nil, err
@@ -102,62 +141,32 @@ func ListOpenAICompatibleFiles(ctx context.Context, client *llmclient.Client, pu
 	return &resp, nil
 }
 
-// GetOpenAICompatibleFile retrieves a file object by id.
+// GetOpenAICompatibleFile retrieves a file object by id after normalizing the
+// incoming id via validatedOpenAICompatibleFileID. Missing response ID and
+// Object fields are synthesized on the returned file object.
 func GetOpenAICompatibleFile(ctx context.Context, client *llmclient.Client, id string) (*core.FileObject, error) {
-	if client == nil {
-		return nil, core.NewInvalidRequestError("provider client is not configured", nil)
-	}
-	if strings.TrimSpace(id) == "" {
-		return nil, core.NewInvalidRequestError("file id is required", nil)
-	}
-
-	var resp core.FileObject
-	if err := client.Do(ctx, llmclient.Request{
-		Method:   http.MethodGet,
-		Endpoint: "/files/" + url.PathEscape(strings.TrimSpace(id)),
-	}, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Object == "" {
-		resp.Object = "file"
-	}
-	return &resp, nil
+	return doOpenAICompatibleFileIDRequest[core.FileObject](ctx, client, http.MethodGet, id, "file")
 }
 
-// DeleteOpenAICompatibleFile deletes a file object by id.
+// DeleteOpenAICompatibleFile deletes a file object by id after normalizing the
+// incoming id via validatedOpenAICompatibleFileID. Missing response ID and
+// Object fields are synthesized on the returned delete response.
 func DeleteOpenAICompatibleFile(ctx context.Context, client *llmclient.Client, id string) (*core.FileDeleteResponse, error) {
-	if client == nil {
-		return nil, core.NewInvalidRequestError("provider client is not configured", nil)
-	}
-	if strings.TrimSpace(id) == "" {
-		return nil, core.NewInvalidRequestError("file id is required", nil)
-	}
-
-	var resp core.FileDeleteResponse
-	if err := client.Do(ctx, llmclient.Request{
-		Method:   http.MethodDelete,
-		Endpoint: "/files/" + url.PathEscape(strings.TrimSpace(id)),
-	}, &resp); err != nil {
-		return nil, err
-	}
-	if resp.Object == "" {
-		resp.Object = "file"
-	}
-	return &resp, nil
+	return doOpenAICompatibleFileIDRequest[core.FileDeleteResponse](ctx, client, http.MethodDelete, id, "file")
 }
 
-// GetOpenAICompatibleFileContent fetches file bytes via /files/{id}/content.
+// GetOpenAICompatibleFileContent fetches file bytes via /files/{id}/content
+// after normalizing the incoming id via validatedOpenAICompatibleFileID. The
+// returned response always includes the normalized file ID.
 func GetOpenAICompatibleFileContent(ctx context.Context, client *llmclient.Client, id string) (*core.FileContentResponse, error) {
-	if client == nil {
-		return nil, core.NewInvalidRequestError("provider client is not configured", nil)
-	}
-	if strings.TrimSpace(id) == "" {
-		return nil, core.NewInvalidRequestError("file id is required", nil)
+	trimmedID, err := validatedOpenAICompatibleFileID(client, id)
+	if err != nil {
+		return nil, err
 	}
 
 	raw, err := client.DoRaw(ctx, llmclient.Request{
 		Method:   http.MethodGet,
-		Endpoint: "/files/" + url.PathEscape(strings.TrimSpace(id)) + "/content",
+		Endpoint: "/files/" + url.PathEscape(trimmedID) + "/content",
 	})
 	if err != nil {
 		return nil, err
@@ -167,7 +176,7 @@ func GetOpenAICompatibleFileContent(ctx context.Context, client *llmclient.Clien
 	}
 
 	return &core.FileContentResponse{
-		ID:          strings.TrimSpace(id),
+		ID:          trimmedID,
 		ContentType: "application/octet-stream",
 		Data:        raw.Body,
 	}, nil
