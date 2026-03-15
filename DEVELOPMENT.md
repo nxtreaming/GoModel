@@ -9,6 +9,7 @@ make install-tools
 ```
 
 This installs:
+
 - [golangci-lint v2](https://golangci-lint.run/welcome/install/) — required for `make lint`
 - [pre-commit](https://pre-commit.com/) — required for git hook setup
 
@@ -45,6 +46,14 @@ Releases are generated automatically from merged PRs, categorized by labels and 
 - Prefer **Squash and merge** so each PR lands as one commit aligned with the PR title
 - If needed, apply `release:skip` on a PR to force exclusion from release notes
 
+## Repomix
+
+You can compress the whole repository for LLMs with the following command:
+
+```
+$ repomix -i "./*.md,./**/*_test.go,./tests/,./**/*.md,./.claude/,./data/,./docs/,./helm/,./.cache/,./.github/,./cmd/gomodel/docs/" --style=markdown --remove-comments
+```
+
 ## Log output
 
 Log format is chosen automatically based on the environment:
@@ -60,11 +69,11 @@ Log format is chosen automatically based on the environment:
 
 Override the auto-detection with `LOG_FORMAT`:
 
-| Value | Effect |
-|---|---|
+| Value     | Effect                                          |
+| --------- | ----------------------------------------------- |
 | _(unset)_ | Auto-detect: text+colors on TTY, JSON otherwise |
-| `text` | Always text (no colors if not a TTY) |
-| `json` | Always JSON, even on a TTY |
+| `text`    | Always text (no colors if not a TTY)            |
+| `json`    | Always JSON, even on a TTY                      |
 
 ```bash
 LOG_FORMAT=text make run   # force text output
