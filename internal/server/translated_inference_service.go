@@ -22,6 +22,7 @@ import (
 type translatedInferenceService struct {
 	provider                 core.RoutableProvider
 	modelResolver            RequestModelResolver
+	executionPolicyResolver  RequestExecutionPolicyResolver
 	translatedRequestPatcher TranslatedRequestPatcher
 	logger                   auditlog.LoggerInterface
 	usageLogger              usage.LoggerInterface
@@ -83,7 +84,7 @@ func (s *translatedInferenceService) dispatchChatCompletion(c *echo.Context, req
 		if handled, err := s.tryFastPathStreamingChatPassthrough(c, plan, req); handled {
 			return err
 		}
-		return s.handleStreamingResponse(c, usageModel, providerType, func() (io.ReadCloser, error) {
+		return s.handleStreamingResponse(c, plan, usageModel, providerType, func() (io.ReadCloser, error) {
 			return s.provider.StreamChatCompletion(ctx, streamReq)
 		})
 	}
@@ -93,7 +94,7 @@ func (s *translatedInferenceService) dispatchChatCompletion(c *echo.Context, req
 		return handleError(c, err)
 	}
 
-	s.logUsage(resp.Model, providerType, func(pricing *core.ModelPricing) *usage.UsageEntry {
+	s.logUsage(plan, resp.Model, providerType, func(pricing *core.ModelPricing) *usage.UsageEntry {
 		return usage.ExtractFromChatResponse(resp, requestID, providerType, "/v1/chat/completions", pricing)
 	})
 
@@ -120,7 +121,7 @@ func handleTranslatedInference[R any](
 		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
 	}
 	modelPtr, providerPtr := modelProvider(req)
-	plan, err := ensureTranslatedRequestPlan(c, s.provider, s.modelResolver, modelPtr, providerPtr)
+	plan, err := ensureTranslatedRequestPlan(c, s.provider, s.modelResolver, s.executionPolicyResolver, modelPtr, providerPtr)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -147,12 +148,16 @@ func handleWithCache[R any](
 	plan *core.ExecutionPlan,
 	dispatch func(*echo.Context, R, *core.ExecutionPlan) error,
 ) error {
-	if s.guardrailsHash != "" {
-		ctx := core.WithGuardrailsHash(c.Request().Context(), s.guardrailsHash)
+	guardrailsHash := s.guardrailsHash
+	if plan != nil && plan.Policy != nil {
+		guardrailsHash = plan.GuardrailsHash()
+	}
+	if guardrailsHash != "" {
+		ctx := core.WithGuardrailsHash(c.Request().Context(), guardrailsHash)
 		c.SetRequest(c.Request().WithContext(ctx))
 	}
 
-	if s.responseCache != nil && !stream {
+	if s.responseCache != nil && !stream && (plan == nil || plan.CacheEnabled()) {
 		body, marshalErr := marshalRequestBody(req)
 		if marshalErr != nil {
 			slog.Debug("marshalRequestBody failed", "err", marshalErr)
@@ -172,10 +177,10 @@ func (s *translatedInferenceService) dispatchResponses(c *echo.Context, req *cor
 	requestID := requestIDFromContextOrHeader(c.Request())
 
 	if req.Stream {
-		if s.shouldEnforceReturningUsageData() {
+		if (plan == nil || plan.UsageEnabled()) && s.shouldEnforceReturningUsageData() {
 			ctx = core.WithEnforceReturningUsageData(ctx, true)
 		}
-		return s.handleStreamingResponse(c, usageModel, providerType, func() (io.ReadCloser, error) {
+		return s.handleStreamingResponse(c, plan, usageModel, providerType, func() (io.ReadCloser, error) {
 			return s.provider.StreamResponses(ctx, req)
 		})
 	}
@@ -185,7 +190,7 @@ func (s *translatedInferenceService) dispatchResponses(c *echo.Context, req *cor
 		return handleError(c, err)
 	}
 
-	s.logUsage(resp.Model, providerType, func(pricing *core.ModelPricing) *usage.UsageEntry {
+	s.logUsage(plan, resp.Model, providerType, func(pricing *core.ModelPricing) *usage.UsageEntry {
 		return usage.ExtractFromResponsesResponse(resp, requestID, providerType, "/v1/responses", pricing)
 	})
 
@@ -291,7 +296,7 @@ func (s *translatedInferenceService) Embeddings(c *echo.Context) error {
 	if err != nil {
 		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
 	}
-	plan, err := ensureTranslatedRequestPlan(c, s.provider, s.modelResolver, &req.Model, &req.Provider)
+	plan, err := ensureTranslatedRequestPlan(c, s.provider, s.modelResolver, s.executionPolicyResolver, &req.Model, &req.Provider)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -305,14 +310,19 @@ func (s *translatedInferenceService) Embeddings(c *echo.Context) error {
 		return handleError(c, err)
 	}
 
-	s.logUsage(resp.Model, providerType, func(pricing *core.ModelPricing) *usage.UsageEntry {
+	s.logUsage(plan, resp.Model, providerType, func(pricing *core.ModelPricing) *usage.UsageEntry {
 		return usage.ExtractFromEmbeddingResponse(resp, requestID, providerType, "/v1/embeddings", pricing)
 	})
 
 	return c.JSON(http.StatusOK, resp)
 }
 
-func (s *translatedInferenceService) handleStreamingResponse(c *echo.Context, model, provider string, streamFn func() (io.ReadCloser, error)) error {
+func (s *translatedInferenceService) handleStreamingResponse(
+	c *echo.Context,
+	plan *core.ExecutionPlan,
+	model, provider string,
+	streamFn func() (io.ReadCloser, error),
+) error {
 	stream, err := streamFn()
 	if err != nil {
 		return handleError(c, err)
@@ -322,6 +332,10 @@ func (s *translatedInferenceService) handleStreamingResponse(c *echo.Context, mo
 	auditlog.EnrichEntryWithStream(c, true)
 
 	entry := auditlog.GetStreamEntryFromContext(c)
+	auditEnabled := s.logger != nil && s.logger.Config().Enabled && (plan == nil || plan.AuditEnabled())
+	if auditEnabled && entry != nil {
+		auditlog.PopulateRequestData(entry, c.Request(), s.logger.Config())
+	}
 	streamEntry := auditlog.CreateStreamEntry(entry)
 	if streamEntry != nil {
 		streamEntry.StatusCode = http.StatusOK
@@ -330,10 +344,10 @@ func (s *translatedInferenceService) handleStreamingResponse(c *echo.Context, mo
 	requestID := requestIDFromContextOrHeader(c.Request())
 	endpoint := c.Request().URL.Path
 	observers := make([]streaming.Observer, 0, 2)
-	if s.logger != nil && s.logger.Config().Enabled && streamEntry != nil {
+	if auditEnabled && streamEntry != nil {
 		observers = append(observers, auditlog.NewStreamLogObserver(s.logger, streamEntry, endpoint))
 	}
-	if s.usageLogger != nil && s.usageLogger.Config().Enabled {
+	if s.usageLogger != nil && s.usageLogger.Config().Enabled && (plan == nil || plan.UsageEnabled()) {
 		observers = append(observers, usage.NewStreamUsageObserver(s.usageLogger, model, provider, requestID, endpoint, s.pricingResolver))
 	}
 	wrappedStream := streaming.NewObservedSSEStream(stream, observers...)
@@ -346,12 +360,8 @@ func (s *translatedInferenceService) handleStreamingResponse(c *echo.Context, mo
 	c.Response().Header().Set("Cache-Control", "no-cache")
 	c.Response().Header().Set("Connection", "keep-alive")
 
-	if streamEntry != nil && streamEntry.Data != nil {
-		streamEntry.Data.ResponseHeaders = map[string]string{
-			"Content-Type":  "text/event-stream",
-			"Cache-Control": "no-cache",
-			"Connection":    "keep-alive",
-		}
+	if auditEnabled && streamEntry != nil && s.logger.Config().LogHeaders {
+		auditlog.PopulateResponseHeaders(streamEntry, c.Response().Header())
 	}
 
 	c.Response().WriteHeader(http.StatusOK)
@@ -361,8 +371,12 @@ func (s *translatedInferenceService) handleStreamingResponse(c *echo.Context, mo
 	return nil
 }
 
-func (s *translatedInferenceService) logUsage(model, providerType string, extractFn func(*core.ModelPricing) *usage.UsageEntry) {
-	if s.usageLogger == nil || !s.usageLogger.Config().Enabled {
+func (s *translatedInferenceService) logUsage(
+	plan *core.ExecutionPlan,
+	model, providerType string,
+	extractFn func(*core.ModelPricing) *usage.UsageEntry,
+) {
+	if s.usageLogger == nil || !s.usageLogger.Config().Enabled || (plan != nil && !plan.UsageEnabled()) {
 		return
 	}
 	var pricing *core.ModelPricing
@@ -392,7 +406,7 @@ func (s *translatedInferenceService) resolveProviderAndModelFromPlan(
 	}
 
 	model := resolvedModelFromPlan(plan, fallbackModel)
-	if req == nil || !req.Stream || !s.shouldEnforceReturningUsageData() {
+	if req == nil || !req.Stream || (plan != nil && !plan.UsageEnabled()) || !s.shouldEnforceReturningUsageData() {
 		return req, providerType, model
 	}
 
