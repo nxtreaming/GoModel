@@ -2,7 +2,9 @@ package responsecache
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,6 +90,178 @@ func TestHandleRequest_SemanticMissPopulatesExactCache(t *testing.T) {
 	}
 	if handlerCalls != 1 {
 		t.Fatalf("exact hit should not call handler again, handlerCalls=%d", handlerCalls)
+	}
+}
+
+func TestHandleInternalRequest_RejectsNilContext(t *testing.T) {
+	m := NewResponseCacheMiddlewareWithStore(cache.NewMapStore(), time.Hour)
+	var nilCtx context.Context
+
+	_, err := m.HandleInternalRequest(nilCtx, http.MethodPost, "/v1/chat/completions", []byte(`{}`), func(c *echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"ok": "1"})
+	})
+	if err == nil {
+		t.Fatal("HandleInternalRequest() error = nil, want invalid request error")
+	}
+
+	gatewayErr, ok := err.(*core.GatewayError)
+	if !ok {
+		t.Fatalf("HandleInternalRequest() error = %T, want *core.GatewayError", err)
+	}
+	if gatewayErr.Type != core.ErrorTypeInvalidRequest {
+		t.Fatalf("error type = %q, want %q", gatewayErr.Type, core.ErrorTypeInvalidRequest)
+	}
+}
+
+func TestInternalRequestHeaders_AllowlistsSafeSnapshotHeaders(t *testing.T) {
+	ctx := core.WithRequestID(context.Background(), "req_123")
+	ctx = core.WithRequestSnapshot(ctx, core.NewRequestSnapshot(
+		http.MethodPost,
+		"/v1/chat/completions",
+		nil,
+		nil,
+		http.Header{
+			"Accept":        []string{"application/json"},
+			"Authorization": []string{"Bearer secret"},
+			"Baggage":       []string{"user_id=123"},
+			"Cache-Control": []string{"no-store"},
+			"Cookie":        []string{"session=secret"},
+			"Traceparent":   []string{"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
+			"User-Agent":    []string{"gomodel-test"},
+			"X-Api-Key":     []string{"secret-key"},
+		},
+		"application/json",
+		nil,
+		false,
+		"snapshot_req",
+		nil,
+		"/team/alpha",
+	))
+
+	headers := internalRequestHeaders(ctx)
+
+	if got := headers.Get("Accept"); got != "application/json" {
+		t.Fatalf("Accept = %q, want application/json", got)
+	}
+	if got := headers.Get("User-Agent"); got != "gomodel-test" {
+		t.Fatalf("User-Agent = %q, want gomodel-test", got)
+	}
+	if got := headers.Get("Traceparent"); got == "" {
+		t.Fatal("Traceparent = empty, want preserved trace header")
+	}
+	if got := headers.Get("Baggage"); got != "user_id=123" {
+		t.Fatalf("Baggage = %q, want user_id=123", got)
+	}
+	if got := headers.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := headers.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json default", got)
+	}
+	if got := headers.Get("X-Request-ID"); got != "req_123" {
+		t.Fatalf("X-Request-ID = %q, want req_123", got)
+	}
+	if got := headers.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want omitted", got)
+	}
+	if got := headers.Get("Cookie"); got != "" {
+		t.Fatalf("Cookie = %q, want omitted", got)
+	}
+	if got := headers.Get("X-Api-Key"); got != "" {
+		t.Fatalf("X-Api-Key = %q, want omitted", got)
+	}
+}
+
+func TestHandleInternalRequest_RejectsNilMiddleware(t *testing.T) {
+	var m *ResponseCacheMiddleware
+
+	_, err := m.HandleInternalRequest(context.Background(), http.MethodPost, "/v1/chat/completions", []byte(`{}`), func(c *echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"ok": "1"})
+	})
+	if err == nil {
+		t.Fatal("HandleInternalRequest() error = nil, want provider error")
+	}
+
+	gatewayErr, ok := err.(*core.GatewayError)
+	if !ok {
+		t.Fatalf("HandleInternalRequest() error = %T, want *core.GatewayError", err)
+	}
+	if gatewayErr.Type != core.ErrorTypeProvider {
+		t.Fatalf("error type = %q, want %q", gatewayErr.Type, core.ErrorTypeProvider)
+	}
+	if gatewayErr.HTTPStatusCode() != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d", gatewayErr.HTTPStatusCode(), http.StatusInternalServerError)
+	}
+}
+
+func TestHandleInternalRequest_NormalizesNonGatewayErrors(t *testing.T) {
+	m := NewResponseCacheMiddlewareWithStore(cache.NewMapStore(), time.Hour)
+	originalErr := errors.New("cache executor failed")
+
+	_, err := m.HandleInternalRequest(context.Background(), http.MethodPost, "/v1/chat/completions", []byte(`{}`), func(*echo.Context) error {
+		return originalErr
+	})
+	if err == nil {
+		t.Fatal("HandleInternalRequest() error = nil, want provider error")
+	}
+
+	gatewayErr, ok := err.(*core.GatewayError)
+	if !ok {
+		t.Fatalf("HandleInternalRequest() error = %T, want *core.GatewayError", err)
+	}
+	if gatewayErr.Type != core.ErrorTypeProvider {
+		t.Fatalf("error type = %q, want %q", gatewayErr.Type, core.ErrorTypeProvider)
+	}
+	if gatewayErr.Message != originalErr.Error() {
+		t.Fatalf("message = %q, want %q", gatewayErr.Message, originalErr.Error())
+	}
+	if !errors.Is(gatewayErr, originalErr) {
+		t.Fatal("expected wrapped gateway error to preserve original cause")
+	}
+}
+
+func TestHandleInternalRequest_RejectsUninitializedEcho(t *testing.T) {
+	m := &ResponseCacheMiddleware{}
+
+	_, err := m.HandleInternalRequest(context.Background(), http.MethodPost, "/v1/chat/completions", []byte(`{}`), func(c *echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"ok": "1"})
+	})
+	if err == nil {
+		t.Fatal("HandleInternalRequest() error = nil, want provider error")
+	}
+
+	gatewayErr, ok := err.(*core.GatewayError)
+	if !ok {
+		t.Fatalf("HandleInternalRequest() error = %T, want *core.GatewayError", err)
+	}
+	if gatewayErr.Type != core.ErrorTypeProvider {
+		t.Fatalf("error type = %q, want %q", gatewayErr.Type, core.ErrorTypeProvider)
+	}
+	if gatewayErr.HTTPStatusCode() != http.StatusInternalServerError {
+		t.Fatalf("status code = %d, want %d", gatewayErr.HTTPStatusCode(), http.StatusInternalServerError)
+	}
+}
+
+func TestInternalCacheType_ParsesHeaderShapes(t *testing.T) {
+	cases := []struct {
+		headerValue string
+		want        string
+	}{
+		{headerValue: CacheHeaderExact, want: CacheTypeExact},
+		{headerValue: CacheHeaderSemantic, want: CacheTypeSemantic},
+		{headerValue: "HIT ( semantic )", want: CacheTypeSemantic},
+		{headerValue: "  HIT (exact)  ", want: CacheTypeExact},
+		{headerValue: CacheTypeExact, want: CacheTypeExact},
+		{headerValue: CacheTypeSemantic, want: CacheTypeSemantic},
+		{headerValue: "HIT (unknown-cache)", want: ""},
+		{headerValue: "MISS", want: ""},
+		{headerValue: "", want: ""},
+	}
+
+	for _, tc := range cases {
+		if got := internalCacheType(tc.headerValue); got != tc.want {
+			t.Fatalf("internalCacheType(%q) = %q, want %q", tc.headerValue, got, tc.want)
+		}
 	}
 }
 

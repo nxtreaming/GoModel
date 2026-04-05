@@ -103,10 +103,25 @@ test('dashboard templates expose a settings page and timezone context in activit
 
 test('guardrails authoring moved to a top-level page while settings keeps the general switch', () => {
     const template = readHelperDisclosureTemplateSource();
+    const css = readFixture('../../css/dashboard.css');
 
     assert.match(template, /<div class="settings-subnav">[\s\S]*class="settings-subnav-btn active"[\s\S]*>General<\/button>/);
     assert.match(template, /<div x-show="page==='guardrails'">[\s\S]*<h2>Guardrails<\/h2>/);
     assert.match(template, /Guardrail Library/);
+    assert.match(template, /x-ref="guardrailTypeSelect"/);
+    assert.match(template, /x-model="guardrailForm\.type"/);
+    assert.match(template, /x-effect="guardrailTypes\.length; guardrailForm\.type; \$nextTick\(\(\) => syncGuardrailTypeSelectValue\(\)\)"/);
     assert.match(template, /x-model="guardrailForm\.user_path"[^>]*aria-label="Guardrail user path"/);
-    assert.match(template, /Reserved for future UI visibility scoping\. It does not affect runtime execution yet\./);
+    assert.match(template, /Only used for auxiliary rewrite \(llm_based_altering\) guardrails; ignored for other guardrail types\./);
+    assert.match(template, /<fieldset class="alias-form-field alias-form-field-wide alias-form-field-fieldset"[^>]*:aria-describedby="field\.help \? 'guardrail-field-help-' \+ field\.key : null"/);
+    assert.match(template, /<legend class="alias-form-field-legend" x-text="field\.label"><\/legend>/);
+    assert.match(template, /<small class="alias-form-hint" :id="'guardrail-field-help-' \+ field\.key" x-show="field\.help" x-text="field\.help"><\/small>/);
+
+    const fieldsetRule = readCSSRule(css, '.alias-form-field-fieldset');
+    assert.match(fieldsetRule, /border:\s*0/);
+    assert.match(fieldsetRule, /padding:\s*0/);
+
+    const legendRule = readCSSRule(css, '.alias-form-field-legend');
+    assert.match(legendRule, /text-transform:\s*uppercase/);
+    assert.match(legendRule, /letter-spacing:\s*0\.5px/);
 });

@@ -223,19 +223,26 @@ func enrichEntryWithExecutionPlan(entry *LogEntry, plan *core.ExecutionPlan) {
 }
 
 func captureLoggedRequestBody(entry *LogEntry, bodyBytes []byte) {
+	entry.Data.RequestBody = captureLoggedBody(bodyBytes)
+}
+
+func captureLoggedResponseBody(entry *LogEntry, bodyBytes []byte) {
+	entry.Data.ResponseBody = captureLoggedBody(bodyBytes)
+}
+
+func captureLoggedBody(bodyBytes []byte) any {
 	if len(bodyBytes) == 0 {
-		return
+		return nil
 	}
 
 	// Parse JSON to any for native BSON storage in MongoDB
 	var parsed any
 	if jsonErr := json.Unmarshal(bodyBytes, &parsed); jsonErr == nil {
-		entry.Data.RequestBody = parsed
-		return
+		return parsed
 	}
 
 	// Fallback: store as valid UTF-8 string if not valid JSON
-	entry.Data.RequestBody = toValidUTF8String(bodyBytes)
+	return toValidUTF8String(bodyBytes)
 }
 
 // responseBodyCapture wraps http.ResponseWriter to capture the response body.
@@ -378,6 +385,13 @@ func EnrichEntryWithExecutionPlan(c *echo.Context, plan *core.ExecutionPlan) {
 	enrichEntryWithExecutionPlan(entry, plan)
 }
 
+// EnrichLogEntryWithExecutionPlan attaches execution-plan metadata directly to
+// an existing log entry. Internal translated executors can use this without
+// depending on Echo middleware state.
+func EnrichLogEntryWithExecutionPlan(entry *LogEntry, plan *core.ExecutionPlan) {
+	enrichEntryWithExecutionPlan(entry, plan)
+}
+
 // EnrichEntryWithCacheType attaches cache-hit metadata to the live audit entry.
 // The value is intentionally sourced directly from the cache middleware, not
 // inferred from response headers after the fact.
@@ -455,6 +469,12 @@ func EnrichEntryWithUserPath(c *echo.Context, userPath string) {
 		return
 	}
 	entry.UserPath = userPath
+}
+
+// EnrichLogEntryWithRequestContext attaches auth and effective user-path
+// metadata from context directly to an existing log entry.
+func EnrichLogEntryWithRequestContext(entry *LogEntry, ctx context.Context) {
+	applyAuthentication(entry, ctx)
 }
 
 func auditEnabledForContext(ctx context.Context) bool {

@@ -57,15 +57,18 @@ func (r *Result) Close() error {
 }
 
 // New creates a guardrails subsystem with its own storage connection.
-func New(ctx context.Context, cfg *config.Config, refreshInterval time.Duration) (*Result, error) {
+func New(ctx context.Context, cfg *config.Config, refreshInterval time.Duration, executors ...ChatCompletionExecutor) (*Result, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
+	}
+	if err := validateExecutorCount(executors); err != nil {
+		return nil, err
 	}
 	storeConn, err := storage.New(ctx, cfg.Storage.BackendConfig())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
-	result, err := newResult(ctx, storeConn, refreshInterval)
+	result, err := newResult(ctx, storeConn, refreshInterval, executors...)
 	if err != nil {
 		_ = storeConn.Close()
 		return nil, err
@@ -75,19 +78,25 @@ func New(ctx context.Context, cfg *config.Config, refreshInterval time.Duration)
 }
 
 // NewWithSharedStorage creates a guardrails subsystem using an existing storage connection.
-func NewWithSharedStorage(ctx context.Context, shared storage.Storage, refreshInterval time.Duration) (*Result, error) {
+func NewWithSharedStorage(ctx context.Context, shared storage.Storage, refreshInterval time.Duration, executors ...ChatCompletionExecutor) (*Result, error) {
 	if shared == nil {
 		return nil, fmt.Errorf("shared storage is required")
 	}
-	return newResult(ctx, shared, refreshInterval)
+	if err := validateExecutorCount(executors); err != nil {
+		return nil, err
+	}
+	return newResult(ctx, shared, refreshInterval, executors...)
 }
 
-func newResult(ctx context.Context, storeConn storage.Storage, refreshInterval time.Duration) (*Result, error) {
+func newResult(ctx context.Context, storeConn storage.Storage, refreshInterval time.Duration, executors ...ChatCompletionExecutor) (*Result, error) {
+	if err := validateExecutorCount(executors); err != nil {
+		return nil, err
+	}
 	store, err := createStore(ctx, storeConn)
 	if err != nil {
 		return nil, err
 	}
-	service, err := NewService(store)
+	service, err := NewService(store, executors...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,4 +164,11 @@ func startGuardrailRefreshLoop(parent context.Context, service *Service, interva
 			<-done
 		})
 	}, errs
+}
+
+func validateExecutorCount(executors []ChatCompletionExecutor) error {
+	if len(executors) > 1 {
+		return fmt.Errorf("only one ChatCompletionExecutor is supported")
+	}
+	return nil
 }

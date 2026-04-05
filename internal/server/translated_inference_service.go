@@ -161,14 +161,8 @@ func handleWithCache[R any](
 	plan *core.ExecutionPlan,
 	dispatch func(*echo.Context, R, *core.ExecutionPlan) error,
 ) error {
-	guardrailsHash := s.guardrailsHash
-	if plan != nil && plan.Policy != nil {
-		guardrailsHash = plan.GuardrailsHash()
-	}
-	if guardrailsHash != "" {
-		ctx := core.WithGuardrailsHash(c.Request().Context(), guardrailsHash)
-		c.SetRequest(c.Request().WithContext(ctx))
-	}
+	ctx := s.withCacheRequestContext(c.Request().Context(), plan)
+	c.SetRequest(c.Request().WithContext(ctx))
 
 	if s.responseCache != nil && (plan == nil || plan.CacheEnabled()) {
 		body, marshalErr := marshalRequestBody(req)
@@ -182,6 +176,22 @@ func handleWithCache[R any](
 	}
 
 	return dispatch(c, req, plan)
+}
+
+func (s *translatedInferenceService) withCacheRequestContext(ctx context.Context, plan *core.ExecutionPlan) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if plan != nil {
+		ctx = core.WithExecutionPlan(ctx, plan)
+	}
+	if plan != nil && plan.Policy != nil {
+		return core.WithGuardrailsHash(ctx, plan.GuardrailsHash())
+	}
+	if s.guardrailsHash != "" {
+		return core.WithGuardrailsHash(ctx, s.guardrailsHash)
+	}
+	return ctx
 }
 
 func (s *translatedInferenceService) dispatchResponses(c *echo.Context, req *core.ResponsesRequest, plan *core.ExecutionPlan) error {

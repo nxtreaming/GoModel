@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v5"
 
+	"gomodel/internal/core"
 	"gomodel/internal/executionplans"
 	"gomodel/internal/guardrails"
 )
@@ -137,8 +139,42 @@ func TestListGuardrailTypes(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if len(body) == 0 || body[0].Type != "system_prompt" {
-		t.Fatalf("body = %#v, want system_prompt type definition", body)
+	var sawSystemPrompt bool
+	var sawLLMBasedAltering bool
+	for _, typeDef := range body {
+		switch typeDef.Type {
+		case "system_prompt":
+			sawSystemPrompt = true
+		case "llm_based_altering":
+			sawLLMBasedAltering = true
+		}
+	}
+	if !sawSystemPrompt || !sawLLMBasedAltering {
+		t.Fatalf("body = %#v, want system_prompt and llm_based_altering type definitions", body)
+	}
+	for _, typeDef := range body {
+		if typeDef.Type != "llm_based_altering" {
+			continue
+		}
+		if len(typeDef.Defaults) == 0 {
+			t.Fatal("llm_based_altering defaults = empty, want built-in defaults")
+		}
+		var defaults map[string]any
+		if err := json.Unmarshal(typeDef.Defaults, &defaults); err != nil {
+			t.Fatalf("json.Unmarshal(defaults) error = %v", err)
+		}
+		prompt, ok := defaults["prompt"].(string)
+		if !ok {
+			t.Fatalf("llm_based_altering defaults.prompt = %#v, want string", defaults["prompt"])
+		}
+		if got := strings.TrimSpace(prompt); got == "" {
+			t.Fatalf("llm_based_altering defaults.prompt = %q, want built-in prompt", got)
+		}
+		for _, field := range typeDef.Fields {
+			if field.Key == "provider" {
+				t.Fatalf("llm_based_altering fields = %#v, want provider field removed", typeDef.Fields)
+			}
+		}
 	}
 }
 
@@ -174,6 +210,123 @@ func TestUpsertGuardrail(t *testing.T) {
 	}
 	if guardrail.UserPath != "/team/alpha" {
 		t.Fatalf("guardrail.UserPath = %q, want /team/alpha", guardrail.UserPath)
+	}
+}
+
+func TestUpsertGuardrailLLMBasedAltering(t *testing.T) {
+	h := newGuardrailHandler(t)
+	e := echo.New()
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/guardrails/privacy", bytes.NewBufferString(`{
+		"type":"llm_based_altering",
+		"description":"Rewrite user PII",
+		"config":{"model":"gpt-4o-mini","roles":["user","tool"]}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/admin/api/v1/guardrails/:name")
+	c.SetPathValues(echo.PathValues{{Name: "name", Value: "privacy"}})
+
+	if err := h.UpsertGuardrail(c); err != nil {
+		t.Fatalf("UpsertGuardrail() error = %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	guardrail, ok := h.guardrailDefs.Get("privacy")
+	if !ok || guardrail == nil {
+		t.Fatal("Get(privacy) = missing, want saved guardrail")
+	}
+	if guardrail.Type != "llm_based_altering" {
+		t.Fatalf("guardrail.Type = %q, want llm_based_altering", guardrail.Type)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(guardrail.Config, &cfg); err != nil {
+		t.Fatalf("json.Unmarshal(guardrail.Config) error = %v", err)
+	}
+	if cfg["model"] != "gpt-4o-mini" {
+		t.Fatalf("config.model = %#v, want gpt-4o-mini", cfg["model"])
+	}
+	if cfg["max_tokens"] != float64(guardrails.DefaultLLMBasedAlteringMaxTokens) {
+		t.Fatalf("config.max_tokens = %#v, want %d", cfg["max_tokens"], guardrails.DefaultLLMBasedAlteringMaxTokens)
+	}
+}
+
+func TestUpsertGuardrailLLMBasedAlteringNormalizesProviderHintIntoModel(t *testing.T) {
+	h := newGuardrailHandler(t)
+	e := echo.New()
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/guardrails/privacy", bytes.NewBufferString(`{
+		"type":"llm_based_altering",
+		"description":"Rewrite user PII",
+		"config":{"model":"gpt-4o-mini","provider":"openai","roles":["user"]}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/admin/api/v1/guardrails/:name")
+	c.SetPathValues(echo.PathValues{{Name: "name", Value: "privacy"}})
+
+	if err := h.UpsertGuardrail(c); err != nil {
+		t.Fatalf("UpsertGuardrail() error = %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	guardrail, ok := h.guardrailDefs.Get("privacy")
+	if !ok || guardrail == nil {
+		t.Fatal("Get(privacy) = missing, want saved guardrail")
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(guardrail.Config, &cfg); err != nil {
+		t.Fatalf("json.Unmarshal(guardrail.Config) error = %v", err)
+	}
+	if cfg["model"] != "openai/gpt-4o-mini" {
+		t.Fatalf("config.model = %#v, want openai/gpt-4o-mini", cfg["model"])
+	}
+	if _, ok := cfg["provider"]; ok {
+		t.Fatalf("config.provider = %#v, want omitted after normalization", cfg["provider"])
+	}
+}
+
+func TestUpsertGuardrailRejectsSlashInName(t *testing.T) {
+	h := newGuardrailHandler(t)
+	e := echo.New()
+
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/v1/guardrails/privacy/redactor", bytes.NewBufferString(`{
+		"type":"llm_based_altering",
+		"config":{"model":"gpt-4o-mini","roles":["user"]}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/admin/api/v1/guardrails/:name")
+	c.SetPathValues(echo.PathValues{{Name: "name", Value: "privacy/redactor"}})
+
+	if err := h.UpsertGuardrail(c); err != nil {
+		t.Fatalf("UpsertGuardrail() error = %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+
+	envelope := decodeExecutionPlanErrorEnvelope(t, rec.Body.Bytes())
+	if envelope.Error.Type != string(core.ErrorTypeInvalidRequest) {
+		t.Fatalf("error type = %q, want %q", envelope.Error.Type, core.ErrorTypeInvalidRequest)
+	}
+	if envelope.Error.Message != "guardrail name cannot contain '/'" {
+		t.Fatalf("error message = %q, want guardrail name validation failure", envelope.Error.Message)
+	}
+	if envelope.Error.Param != nil {
+		t.Fatalf("error param = %v, want nil", *envelope.Error.Param)
+	}
+	if envelope.Error.Code != nil {
+		t.Fatalf("error code = %v, want nil", *envelope.Error.Code)
 	}
 }
 

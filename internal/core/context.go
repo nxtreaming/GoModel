@@ -36,6 +36,19 @@ const (
 	// Response cache writers use this to avoid storing fallback responses under
 	// the primary request key.
 	fallbackUsedKey contextKey = "fallback-used"
+
+	// requestOriginKey stores the logical request origin for internal execution
+	// flows that still reuse the translated request pipeline.
+	requestOriginKey contextKey = "request-origin"
+)
+
+// RequestOrigin identifies whether a request came from an external caller or an
+// internal gateway-owned workflow.
+type RequestOrigin string
+
+const (
+	RequestOriginExternal  RequestOrigin = "external"
+	RequestOriginGuardrail RequestOrigin = "guardrail"
 )
 
 // WithRequestID returns a new context with the request ID attached.
@@ -191,4 +204,20 @@ func GetFallbackUsed(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+// WithRequestOrigin returns a new context with the logical request origin attached.
+func WithRequestOrigin(ctx context.Context, origin RequestOrigin) context.Context {
+	return context.WithValue(ctx, requestOriginKey, origin)
+}
+
+// GetRequestOrigin retrieves the request origin from context.
+// When unset, external traffic is assumed.
+func GetRequestOrigin(ctx context.Context) RequestOrigin {
+	if v := ctx.Value(requestOriginKey); v != nil {
+		if origin, ok := v.(RequestOrigin); ok && origin != "" {
+			return origin
+		}
+	}
+	return RequestOriginExternal
 }
