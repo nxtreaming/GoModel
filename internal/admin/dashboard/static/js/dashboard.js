@@ -81,13 +81,17 @@ function dashboard() {
 
         // Usage page state
         usageMode: 'tokens',
+        modelUsageView: 'chart',
+        userPathUsageView: 'chart',
         modelUsage: [],
+        userPathUsage: [],
         usageLog: { entries: [], total: 0, limit: 50, offset: 0 },
         usageLogSearch: '',
         usageLogModel: '',
         usageLogProvider: '',
         usageLogUserPath: '',
         usageBarChart: null,
+        usageUserPathChart: null,
 
         // Audit page state
         auditLog: { entries: [], total: 0, limit: 25, offset: 0 },
@@ -183,7 +187,7 @@ function dashboard() {
 
             window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
                 if (this.theme === 'system') {
-                    this.renderChart();
+                    this.rerenderCharts();
                 }
             });
 
@@ -222,8 +226,7 @@ function dashboard() {
             this.theme = t;
             localStorage.setItem('gomodel_theme', t);
             this.applyTheme();
-            this.renderChart();
-            this.renderBarChart();
+            this.rerenderCharts();
         },
 
         toggleTheme() {
@@ -252,6 +255,12 @@ function dashboard() {
                 tooltipBorder: this.cssVar('--chart-tooltip-border'),
                 tooltipText: this.cssVar('--chart-tooltip-text')
             };
+        },
+
+        rerenderCharts() {
+            this.renderChart();
+            this.renderBarChart();
+            this.renderUserPathChart();
         },
 
         saveApiKey() {
@@ -541,21 +550,19 @@ function dashboard() {
         },
 
         qualifiedModelDisplay(value) {
-            const model = String(value && value.model || '').trim();
+            return this.qualifiedModelValueDisplay(value, value && value.model);
+        },
+
+        qualifiedModelValueDisplay(value, modelValue) {
+            const model = String(modelValue || '').trim();
             if (!model) return '-';
-            if (model.includes('/')) return model;
             const provider = this.providerDisplayValue(value);
-            if (!provider) return model;
+            if (!provider || model === provider || model.startsWith(provider + '/')) return model;
             return provider + '/' + model;
         },
 
         qualifiedResolvedModelDisplay(value) {
-            const model = String(value && value.resolved_model || '').trim();
-            if (!model) return '-';
-            if (model.includes('/')) return model;
-            const provider = this.providerDisplayValue(value);
-            if (!provider) return model;
-            return provider + '/' + model;
+            return this.qualifiedModelValueDisplay(value, value && value.resolved_model);
         },
 
         formatNumber(n) {

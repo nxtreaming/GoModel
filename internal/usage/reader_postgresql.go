@@ -82,6 +82,41 @@ func (r *PostgreSQLReader) GetUsageByModel(ctx context.Context, params UsageQuer
 	return result, nil
 }
 
+// GetUsageByUserPath returns token and cost totals grouped by tracked user path.
+func (r *PostgreSQLReader) GetUsageByUserPath(ctx context.Context, params UsageQueryParams) ([]UserPathUsage, error) {
+	userPathExpr := usageGroupedUserPathSQL("user_path")
+	conditions, args, _, err := pgUsageByUserPathConditions(params, userPathExpr, 1)
+	if err != nil {
+		return nil, err
+	}
+	where := buildWhereClause(conditions)
+
+	costCols := `, SUM(input_cost), SUM(output_cost), SUM(total_cost)`
+	query := `SELECT ` + userPathExpr + ` AS user_path, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0)` + costCols + `
+			FROM "usage"` + where + ` GROUP BY ` + userPathExpr
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query usage by user path: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]UserPathUsage, 0)
+	for rows.Next() {
+		var u UserPathUsage
+		if err := rows.Scan(&u.UserPath, &u.InputTokens, &u.OutputTokens, &u.TotalTokens, &u.InputCost, &u.OutputCost, &u.TotalCost); err != nil {
+			return nil, fmt.Errorf("failed to scan usage by user path row: %w", err)
+		}
+		result = append(result, u)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating usage by user path rows: %w", err)
+	}
+
+	return result, nil
+}
+
 // GetUsageLog returns a paginated list of individual usage log entries.
 func (r *PostgreSQLReader) GetUsageLog(ctx context.Context, params UsageLogParams) (*UsageLogResult, error) {
 	limit, offset := clampLimitOffset(params.Limit, params.Offset)
@@ -324,6 +359,23 @@ func pgUsageConditions(params UsageQueryParams, argIdx int) (conditions []string
 	}
 	if userPath != "" {
 		conditions = append(conditions, fmt.Sprintf("(user_path = $%d OR user_path LIKE $%d ESCAPE '\\')", nextIdx, nextIdx+1))
+		args = append(args, userPath, usageUserPathSubtreePattern(userPath))
+		nextIdx += 2
+	}
+	if condition := pgCacheModeCondition(params.CacheMode); condition != "" {
+		conditions = append(conditions, condition)
+	}
+	return conditions, args, nextIdx, nil
+}
+
+func pgUsageByUserPathConditions(params UsageQueryParams, userPathExpr string, argIdx int) (conditions []string, args []any, nextIdx int, err error) {
+	conditions, args, nextIdx = pgDateRangeConditions(params, argIdx)
+	userPath, err := normalizeUsageUserPathFilter(params.UserPath)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if userPath != "" {
+		conditions = append(conditions, fmt.Sprintf("(%s = $%d OR %s LIKE $%d ESCAPE '\\')", userPathExpr, nextIdx, userPathExpr, nextIdx+1))
 		args = append(args, userPath, usageUserPathSubtreePattern(userPath))
 		nextIdx += 2
 	}
