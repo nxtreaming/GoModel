@@ -702,12 +702,16 @@
                     ? setTimeout(() => controller.abort(), 10000)
                     : null;
                 try {
-                    const request = { headers: this.headers() };
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
                     if (controller) {
                         request.signal = controller.signal;
                     }
                     const res = await fetch('/admin/api/v1/dashboard/config', request);
-                    if (!this.handleFetchResponse(res, 'dashboard config')) {
+                    const handled = this.handleFetchResponse(res, 'dashboard config', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
+                    if (!handled) {
                         this.workflowRuntimeConfig = {};
                         return;
                     }
@@ -822,7 +826,7 @@
                     ? setTimeout(() => controller.abort(), 10000)
                     : null;
                 try {
-                    const request = { headers: this.headers() };
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
                     if (controller) {
                         request.signal = controller.signal;
                     }
@@ -832,8 +836,12 @@
                         this.workflows = [];
                         return;
                     }
+                    const handled = this.handleFetchResponse(res, 'workflows', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
                     this.workflowsAvailable = true;
-                    if (!this.handleFetchResponse(res, 'workflows')) {
+                    if (!handled) {
                         this.workflows = [];
                         return;
                     }
@@ -856,8 +864,13 @@
 
             async fetchWorkflowGuardrails() {
                 try {
-                    const res = await fetch('/admin/api/v1/workflows/guardrails', { headers: this.headers() });
-                    if (!this.handleFetchResponse(res, 'workflow guardrails')) {
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
+                    const res = await fetch('/admin/api/v1/workflows/guardrails', request);
+                    const handled = this.handleFetchResponse(res, 'workflow guardrails', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
+                    if (!handled) {
                         this.guardrailRefs = [];
                         return;
                     }
@@ -954,7 +967,7 @@
 	                        ? setTimeout(() => controller.abort(), 10000)
 	                        : null;
 	                    try {
-	                        const options = { headers: this.headers() };
+	                        const options = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
 	                        if (controller) {
 	                            options.signal = controller.signal;
 	                        }
@@ -965,13 +978,13 @@
                         }
                         if (res.status === 401) {
                             if (typeof this.handleFetchResponse === 'function') {
-                                this.handleFetchResponse(res, 'workflow');
+                                this.handleFetchResponse(res, 'workflow', options);
                             }
                             return null;
                         }
                         if (!res.ok) {
                             if (typeof this.handleFetchResponse === 'function') {
-                                this.handleFetchResponse(res, 'workflow');
+                                this.handleFetchResponse(res, 'workflow', options);
                             }
                             return null;
                         }
@@ -1041,14 +1054,20 @@
 
                 this.workflowSubmitting = true;
                 try {
-                    const res = await fetch('/admin/api/v1/workflows', {
-                        method: 'POST',
-                        headers: this.headers(),
-                        body: JSON.stringify(payload)
-                    });
+                    const request = typeof this.requestOptions === 'function'
+                        ? this.requestOptions({
+                            method: 'POST',
+                            body: JSON.stringify(payload)
+                        })
+                        : {
+                            method: 'POST',
+                            headers: this.headers(),
+                            body: JSON.stringify(payload)
+                        };
+                    const res = await fetch('/admin/api/v1/workflows', request);
 
                     if (res.status === 401) {
-                        this.handleFetchResponse(res, 'create workflow');
+                        this.handleFetchResponse(res, 'create workflow', request);
                         return;
                     }
                     if (!res.ok) {
@@ -1330,13 +1349,18 @@
                 this.workflowNotice = '';
                 this.workflowDeactivatingID = workflowID;
                 try {
-                    const res = await fetch('/admin/api/v1/workflows/' + encodeURIComponent(workflowID) + '/deactivate', {
-                        method: 'POST',
-                        headers: this.headers()
-                    });
+                    const request = typeof this.requestOptions === 'function'
+                        ? this.requestOptions({
+                            method: 'POST',
+                        })
+                        : {
+                            method: 'POST',
+                            headers: this.headers()
+                        };
+                    const res = await fetch('/admin/api/v1/workflows/' + encodeURIComponent(workflowID) + '/deactivate', request);
 
                     if (res.status === 401) {
-                        this.handleFetchResponse(res, 'deactivate workflow');
+                        this.handleFetchResponse(res, 'deactivate workflow', request);
                         return;
                     }
                     if (!res.ok) {

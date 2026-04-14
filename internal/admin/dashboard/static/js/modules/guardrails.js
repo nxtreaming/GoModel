@@ -249,14 +249,19 @@
             async fetchGuardrailTypes() {
                 this.guardrailTypesLoading = true;
                 try {
-                    const res = await fetch('/admin/api/v1/guardrails/types', { headers: this.headers() });
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
+                    const res = await fetch('/admin/api/v1/guardrails/types', request);
                     if (res.status === 503) {
                         this.guardrailsAvailable = false;
                         this.guardrailTypes = [];
                         return;
                     }
+                    const handled = this.handleFetchResponse(res, 'guardrail types', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
                     this.guardrailsAvailable = true;
-                    if (!this.handleFetchResponse(res, 'guardrail types')) {
+                    if (!handled) {
                         this.guardrailTypes = [];
                         return;
                     }
@@ -281,14 +286,19 @@
                 this.guardrailsLoading = true;
                 this.guardrailError = '';
                 try {
-                    const res = await fetch('/admin/api/v1/guardrails', { headers: this.headers() });
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
+                    const res = await fetch('/admin/api/v1/guardrails', request);
                     if (res.status === 503) {
                         this.guardrailsAvailable = false;
                         this.guardrails = [];
                         return;
                     }
+                    const handled = this.handleFetchResponse(res, 'guardrails', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
                     this.guardrailsAvailable = true;
-                    if (!this.handleFetchResponse(res, 'guardrails')) {
+                    if (!handled) {
                         this.guardrails = [];
                         return;
                     }

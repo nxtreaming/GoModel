@@ -90,14 +90,19 @@
                 this.authKeysLoading = true;
                 this.authKeyError = '';
                 try {
-                    const res = await fetch('/admin/api/v1/auth-keys', { headers: this.headers() });
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
+                    const res = await fetch('/admin/api/v1/auth-keys', request);
                     if (res.status === 503) {
                         this.authKeysAvailable = false;
                         this.authKeys = [];
                         return;
                     }
+                    const handled = this.handleFetchResponse(res, 'auth keys', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
                     this.authKeysAvailable = true;
-                    if (!this.handleFetchResponse(res, 'auth keys')) {
+                    if (!handled) {
                         if (res.status !== 401) {
                             this.authKeyError = await this._authKeyResponseMessage(res, 'Unable to load API keys.');
                         }

@@ -83,9 +83,18 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
                     </template>
                 </button>
-                <div class="api-key-section" x-show="needsAuth">
-                    <label for="apiKey">API Key</label>
-                    <input id="apiKey" type="password" placeholder="Bearer token" x-model="apiKey" @change="saveApiKey(); fetchAll()">
+                <div class="api-key-section" x-show="needsAuth || hasApiKey()">
+                    <button type="button"
+                            class="api-key-open-btn"
+                            @click="openAuthDialog()"
+                            :aria-label="needsAuth ? 'Enter API key' : 'Change API key'">
+                        <svg class="api-key-open-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M8 11V8a4 4 0 0 1 8 0v3"></path>
+                            <rect x="5" y="11" width="14" height="10" rx="2"></rect>
+                            <path d="M12 15v2"></path>
+                        </svg>
+                        <span x-text="needsAuth ? 'Enter API key' : 'Change API key'">Enter API key</span>
+                    </button>
                 </div>
             </div>
         </aside>
@@ -96,6 +105,59 @@
         <main class="content">
             {{template "index" .}}
         </main>
+        <div class="auth-dialog-backdrop"
+             x-cloak
+             x-show="authDialogOpen"
+             x-transition.opacity.duration.160ms
+             aria-hidden="true"></div>
+        <div class="auth-dialog-shell"
+             x-cloak
+             x-show="authDialogOpen"
+             x-transition.opacity.duration.160ms
+             @click="closeAuthDialog()"
+             @keydown.escape.window="authDialogOpen && closeAuthDialog()">
+            <section class="auth-dialog"
+                     role="dialog"
+                     aria-modal="true"
+                     aria-labelledby="authDialogTitle"
+                     @click.stop>
+                <div class="auth-dialog-header">
+                    <div>
+                        <h2 id="authDialogTitle" x-text="needsAuth ? 'Dashboard locked' : 'Change API key'">Dashboard locked</h2>
+                    </div>
+                    <button type="button" class="auth-dialog-close" aria-label="Close authentication dialog" @click="closeAuthDialog()">&#x2715;</button>
+                </div>
+                <form class="auth-dialog-form" @submit.prevent="submitApiKey()">
+                    <div class="auth-dialog-input-shell">
+                        <svg class="auth-dialog-input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M8 11V8a4 4 0 0 1 8 0v3"></path>
+                            <rect x="5" y="11" width="14" height="10" rx="2"></rect>
+                            <path d="M12 15v2"></path>
+                        </svg>
+                        <input id="authDialogApiKey"
+                               class="auth-dialog-input"
+                               type="password"
+                               placeholder="Master key or bearer token"
+                               aria-label="API key"
+                               autocomplete="current-password"
+                               x-model="apiKey">
+                    </div>
+                    <p class="auth-dialog-error" x-show="authError" role="alert">
+                        Enter a valid API key to continue.
+                    </p>
+                    <p class="auth-dialog-hint">Stored in this browser. Requests use the Authorization bearer header.</p>
+                    <div class="auth-dialog-actions">
+                        <button type="submit"
+                                class="pagination-btn pagination-btn-primary pagination-btn-with-icon auth-dialog-submit-btn">
+                            <svg class="auth-dialog-submit-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M20 6L9 17l-5-5"></path>
+                            </svg>
+                            <span x-text="needsAuth ? 'Unlock dashboard' : 'Save API key'">Unlock dashboard</span>
+                        </button>
+                    </div>
+                </form>
+            </section>
+        </div>
     </div>
     <script src="/admin/static/js/modules/conversation-helpers.js"></script>
     <script src="/admin/static/js/modules/clipboard.js"></script>

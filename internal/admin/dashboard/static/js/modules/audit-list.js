@@ -27,8 +27,13 @@
                     if (this.auditStatusCode) qs += '&status_code=' + encodeURIComponent(this.auditStatusCode);
                     if (this.auditStream) qs += '&stream=' + encodeURIComponent(this.auditStream);
 
-                    const res = await fetch('/admin/api/v1/audit/log?' + qs, { headers: this.headers() });
-                    if (!this.handleFetchResponse(res, 'audit log')) {
+                    const request = typeof this.requestOptions === 'function' ? this.requestOptions() : { headers: this.headers() };
+                    const res = await fetch('/admin/api/v1/audit/log?' + qs, request);
+                    const handled = this.handleFetchResponse(res, 'audit log', request);
+                    if (typeof this.isStaleAuthFetchResult === 'function' && this.isStaleAuthFetchResult(handled)) {
+                        return;
+                    }
+                    if (!handled) {
                         if (requestToken !== this.auditFetchToken) return;
                         this.auditLog = { entries: [], total: 0, limit: 25, offset: 0 };
                         return;

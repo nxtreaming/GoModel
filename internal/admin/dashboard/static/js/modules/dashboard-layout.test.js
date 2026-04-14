@@ -138,7 +138,7 @@ test('dashboard pages reuse a shared auth banner template', () => {
 
     assert.match(
         authBannerTemplate,
-        /{{define "auth-banner"}}[\s\S]*x-show="authError"[\s\S]*Authentication required\. Enter your API key in the sidebar to view data\.[\s\S]*{{end}}/
+        /{{define "auth-banner"}}[\s\S]*class="alert alert-warning auth-banner"[\s\S]*x-show="authError"[\s\S]*Authentication required for dashboard data\.[\s\S]*@click="openAuthDialog\(\)"[\s\S]*Enter API key[\s\S]*{{end}}/
     );
 
     const authBannerCalls = indexTemplate.match(/{{template "auth-banner" \.}}/g) || [];
@@ -147,7 +147,92 @@ test('dashboard pages reuse a shared auth banner template', () => {
     assert.match(indexTemplate, /<template x-if="page==='guardrails'">\s*<div>[\s\S]*{{template "auth-banner" \.}}/);
     assert.doesNotMatch(
         indexTemplate,
-        /<div class="alert alert-warning" x-show="authError">[\s\S]*Authentication required\. Enter your API key in the sidebar to view data\.[\s\S]*<\/div>/
+        /Enter your API key in the sidebar to view data/
+    );
+});
+
+test('dashboard auth uses a root-level dialog instead of a hidden sidebar input', () => {
+    const template = readFixture('../../../templates/layout.html');
+    const css = readFixture('../../css/dashboard.css');
+
+    assert.doesNotMatch(template, /<input id="apiKey"/);
+    assert.match(
+        template,
+        /class="api-key-section" x-show="needsAuth \|\| hasApiKey\(\)"[\s\S]*class="api-key-open-btn"[\s\S]*@click="openAuthDialog\(\)"[\s\S]*class="api-key-open-icon"[\s\S]*Change API key/
+    );
+    assert.doesNotMatch(template, /class="api-key-title"/);
+    assert.doesNotMatch(template, /API key set/);
+    assert.doesNotMatch(template, /Admin access/);
+    const backdropBlock = template.match(/<div class="auth-dialog-backdrop"[\s\S]*?<\/div>/);
+    assert.ok(backdropBlock, 'Expected auth dialog backdrop block');
+    assert.match(backdropBlock[0], /x-show="authDialogOpen"/);
+    assert.match(backdropBlock[0], /aria-hidden="true"/);
+    assert.doesNotMatch(backdropBlock[0], /@click="closeAuthDialog\(\)"/);
+
+    const shellOpening = template.match(/<div class="auth-dialog-shell"[\s\S]*?<section class="auth-dialog"/);
+    assert.ok(shellOpening, 'Expected auth dialog shell block');
+    assert.match(
+        shellOpening[0],
+        /x-show="authDialogOpen"[\s\S]*@click="closeAuthDialog\(\)"/
+    );
+    assert.match(
+        template,
+        /role="dialog"[\s\S]*aria-modal="true"[\s\S]*@click\.stop[\s\S]*id="authDialogApiKey"/
+    );
+    assert.match(template, /class="auth-dialog-input-shell"[\s\S]*class="auth-dialog-input-icon"[\s\S]*id="authDialogApiKey"/);
+    assert.match(template, /x-text="needsAuth \? 'Dashboard locked' : 'Change API key'"/);
+    assert.match(template, /class="pagination-btn pagination-btn-primary pagination-btn-with-icon auth-dialog-submit-btn"[\s\S]*class="auth-dialog-submit-icon"[\s\S]*x-text="needsAuth \? 'Unlock dashboard' : 'Save API key'"/);
+    assert.match(template, /placeholder="Master key or bearer token"/);
+    assert.match(template, /aria-label="API key"/);
+    assert.match(template, /<input id="authDialogApiKey"[\s\S]*type="password"[\s\S]*autocomplete="current-password"[\s\S]*x-model="apiKey"/);
+    assert.match(template, /<p class="auth-dialog-hint">Stored in this browser\. Requests use the Authorization bearer header\.<\/p>/);
+    assert.doesNotMatch(template, />Not now<\/button>/);
+    assert.match(
+        template,
+        /<form class="auth-dialog-form" @submit\.prevent="submitApiKey\(\)"/
+    );
+
+    const cloakRule = readCSSRule(css, '[x-cloak]');
+    assert.match(cloakRule, /display:\s*none !important/);
+
+    const shellRule = readCSSRule(css, '.auth-dialog-shell');
+    assert.match(shellRule, /position:\s*fixed/);
+    assert.match(shellRule, /place-items:\s*center/);
+    assert.match(shellRule, /z-index:\s*90/);
+
+    const dialogRule = readCSSRule(css, '.auth-dialog');
+    assert.match(dialogRule, /width:\s*min\(440px, 100%\)/);
+    assert.match(dialogRule, /border-radius:\s*var\(--radius\)/);
+
+    const apiKeyButtonRule = readCSSRule(css, '.api-key-open-btn');
+    assert.match(apiKeyButtonRule, /display:\s*inline-flex/);
+    assert.match(apiKeyButtonRule, /background:\s*transparent/);
+    assert.match(apiKeyButtonRule, /border:\s*1px solid var\(--accent\)/);
+    assert.match(apiKeyButtonRule, /color:\s*var\(--accent\)/);
+
+    const submitIconRule = readCSSRule(css, '.auth-dialog-submit-icon');
+    assert.match(submitIconRule, /width:\s*16px/);
+    assert.match(submitIconRule, /height:\s*16px/);
+
+    const bannerRule = readCSSRule(css, '.auth-banner');
+    assert.match(bannerRule, /display:\s*flex/);
+    assert.match(bannerRule, /flex-wrap:\s*wrap/);
+
+    assert.match(
+        css,
+        /@media \(max-width: 768px\)[\s\S]*\.sidebar\.sidebar-collapsed \.sidebar-footer \.api-key-section\s*\{ display:\s*grid; \}/
+    );
+    assert.match(
+        css,
+        /@media \(max-width: 768px\)[\s\S]*\.sidebar-footer \.api-key-open-btn span\s*\{\s*display:\s*none;/
+    );
+    assert.match(
+        css,
+        /@media \(max-width: 768px\)[\s\S]*\.sidebar-footer \.api-key-open-btn\s*\{[\s\S]*width:\s*36px;[\s\S]*height:\s*36px;/
+    );
+    assert.match(
+        css,
+        /@media \(max-width: 768px\)[\s\S]*\.sidebar-footer \.api-key-open-icon\s*\{[\s\S]*width:\s*16px/
     );
 });
 
@@ -241,6 +326,16 @@ test('audit toolbar uses a full-width search row above the select row with a rig
 
     const searchRule = readCSSRule(css, '.audit-filter-row-search .filter-input');
     assert.match(searchRule, /grid-column:\s*1\s*\/\s*-1/);
+
+    const selectRule = readCSSRule(css, '.usage-log-select');
+    assert.match(selectRule, /appearance:\s*none/);
+    assert.match(selectRule, /-webkit-appearance:\s*none/);
+    assert.match(selectRule, /padding:\s*8px 34px 8px 12px/);
+    assert.match(selectRule, /background-image:[\s\S]*currentcolor/);
+    assert.match(selectRule, /cursor:\s*pointer/);
+
+    const disabledSelectRule = readCSSRule(css, '.usage-log-select:disabled');
+    assert.match(disabledSelectRule, /cursor:\s*default/);
 
     const controlsRule = readCSSRule(css, '.audit-filter-row-controls .pagination-btn');
     assert.match(controlsRule, /grid-column:\s*11\s*\/\s*-1/);
