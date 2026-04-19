@@ -83,6 +83,90 @@ test('auditResponsePane returns the shared response-pane contract', () => {
     assert.equal(pane.tooLargeMessage, 'Response body was too large to capture.');
 });
 
+test('auditResponsePane surfaces error message from captured error body', () => {
+    const module = createAuditListModule();
+    const entry = {
+        data: {
+            response_body: {
+                error: {
+                    type: 'provider_error',
+                    message: 'http2: timeout awaiting response headers'
+                }
+            }
+        }
+    };
+
+    const pane = module.auditResponsePane(entry);
+
+    assert.equal(module.auditEntryErrorMessage(entry), 'http2: timeout awaiting response headers');
+    assert.equal(pane.showErrorMessage, true);
+    assert.equal(pane.errorMessage, 'http2: timeout awaiting response headers');
+    assert.equal(pane.showEmpty, false);
+});
+
+test('auditEntryErrorMessage extracts JSON encoded gateway error text', () => {
+    const module = createAuditListModule();
+    const entry = {
+        data: {
+            error_message: '{"error":{"message":"circuit breaker is open - provider temporarily unavailable"}}'
+        }
+    };
+
+    assert.equal(
+        module.auditEntryErrorMessage(entry),
+        'circuit breaker is open - provider temporarily unavailable'
+    );
+});
+
+test('auditEntryErrorMessage ignores successful response fields', () => {
+    const module = createAuditListModule();
+    const entry = {
+        data: {
+            response_body: {
+                id: 'chatcmpl_123',
+                choices: [{ message: { content: 'hello' } }]
+            }
+        }
+    };
+
+    const pane = module.auditResponsePane(entry);
+
+    assert.equal(module.auditEntryErrorMessage(entry), '');
+    assert.equal(pane.showErrorMessage, false);
+});
+
+test('auditEntryErrorMessage ignores nested error objects on successful responses without top-level error shape', () => {
+    const module = createAuditListModule();
+    const entry = {
+        status_code: 200,
+        data: {
+            response_body: {
+                output: {
+                    error: {
+                        message: 'should not be treated as a response error'
+                    }
+                }
+            }
+        }
+    };
+
+    assert.equal(module.auditEntryErrorMessage(entry), '');
+});
+
+test('auditEntryErrorMessage reads top-level provider error shapes without relying on status code', () => {
+    const module = createAuditListModule();
+    const entry = {
+        data: {
+            response_body: {
+                message: 'provider timeout',
+                type: 'provider_error'
+            }
+        }
+    };
+
+    assert.equal(module.auditEntryErrorMessage(entry), 'provider timeout');
+});
+
 test('fetchAuditLog preserves a successful payload when workflow prefetch fails', async () => {
     const loggedErrors = [];
     const module = createAuditListModule({
