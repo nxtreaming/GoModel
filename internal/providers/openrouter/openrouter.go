@@ -39,9 +39,10 @@ func New(cfg providers.ProviderConfig, opts providers.ProviderOptions) core.Prov
 		appName: envOrDefault("OPENROUTER_APP_NAME", defaultAppName),
 	}
 	p.CompatibleProvider = openai.NewCompatibleProvider(cfg.APIKey, opts, openai.CompatibleProviderConfig{
-		ProviderName: "openrouter",
-		BaseURL:      baseURL,
-		SetHeaders:   setHeaders,
+		ProviderName:       "openrouter",
+		BaseURL:            baseURL,
+		SetHeaders:         setHeaders,
+		ConfiguredModels:   opts.Models,
 	})
 	p.SetRequestMutator(p.mutateRequest)
 	return p
