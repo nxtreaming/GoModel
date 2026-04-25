@@ -3,67 +3,18 @@
 package e2e
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"gomodel/internal/admin"
-	"gomodel/internal/admin/dashboard"
 	"gomodel/internal/providers"
-	"gomodel/internal/server"
 	"gomodel/internal/usage"
 )
-
-// setupAdminServer creates a new server instance with admin features configured.
-func setupAdminServer(t *testing.T, masterKey string, endpointsEnabled, uiEnabled bool) *httptest.Server {
-	t.Helper()
-
-	// Create test provider using the shared TestProvider
-	testProvider := NewTestProvider(mockLLMURL, "sk-test-key-12345")
-
-	// Create registry and register mock provider with type
-	registry := providers.NewModelRegistry()
-	registry.RegisterProviderWithType(testProvider, "test")
-
-	// Initialize registry synchronously for tests
-	if err := registry.Initialize(context.Background()); err != nil {
-		t.Fatalf("Failed to initialize registry: %v", err)
-	}
-
-	// Create router
-	router, err := providers.NewRouter(registry)
-	if err != nil {
-		t.Fatalf("Failed to create router: %v", err)
-	}
-
-	// Build server config
-	cfg := &server.Config{
-		MasterKey:             masterKey,
-		AdminEndpointsEnabled: endpointsEnabled,
-	}
-
-	if endpointsEnabled {
-		cfg.AdminHandler = admin.NewHandler(nil, registry)
-	}
-
-	if uiEnabled {
-		cfg.AdminUIEnabled = true
-		dashHandler, dashErr := dashboard.New()
-		if dashErr != nil {
-			t.Fatalf("Failed to create dashboard handler: %v", dashErr)
-		}
-		cfg.DashboardHandler = dashHandler
-	}
-
-	srv := server.New(router, cfg)
-	return httptest.NewServer(srv)
-}
 
 func TestAdminAPI_EndpointsEnabled_E2E(t *testing.T) {
 	ts := setupAdminServer(t, "", true, false)
@@ -228,35 +179,75 @@ func TestAdminAPI_ModelsEndpoint_E2E(t *testing.T) {
 }
 
 func TestAdminAPI_UsageEndpoints_E2E(t *testing.T) {
-	ts := setupAdminServer(t, "", true, false)
+	const (
+		expectedRequests                         = 2
+		mockProviderInputTokensPerRequest  int64 = 10
+		mockProviderOutputTokensPerRequest int64 = 20
+		expectedInputTokens                      = mockProviderInputTokensPerRequest * expectedRequests
+		expectedOutputTokens                     = mockProviderOutputTokensPerRequest * expectedRequests
+		expectedTotalTokens                      = expectedInputTokens + expectedOutputTokens
+	)
+
+	// Mock provider usage is 10 input + 20 output tokens per request, and this test sends 2 requests.
+	requestDate := time.Now().UTC()
+	today := requestDate.Format("2006-01-02")
+	yesterday := requestDate.Add(-24 * time.Hour).Format("2006-01-02")
+
+	usageFixture := setupSQLiteUsageFixture(t)
+	ts := setupE2EAdminServer(t, e2eServerOptions{
+		adminUsageReader: usageFixture.reader,
+		usageLogger:      usageFixture.logger,
+	})
 	defer ts.Close()
 
-	t.Run("summary returns zeroed object (nil reader)", func(t *testing.T) {
+	for i := 0; i < expectedRequests; i++ {
+		resp := sendJSONRequest(t, ts.URL+chatCompletionsPath, defaultChatReq("Hello usage"))
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		closeBody(resp)
+	}
+	usageFixture.flush(t)
+
+	t.Run("summary includes persisted usage", func(t *testing.T) {
 		resp, err := http.Get(ts.URL + "/admin/api/v1/usage/summary")
 		require.NoError(t, err)
 		defer closeBody(resp)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		var summary usage.UsageSummary
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&summary))
-		assert.Equal(t, 0, summary.TotalRequests)
-		assert.Equal(t, int64(0), summary.TotalTokens)
+		assert.Equal(t, expectedRequests, summary.TotalRequests)
+		assert.Equal(t, expectedInputTokens, summary.TotalInput)
+		assert.Equal(t, expectedOutputTokens, summary.TotalOutput)
+		assert.Equal(t, expectedTotalTokens, summary.TotalTokens)
 	})
 
-	t.Run("daily returns empty array (nil reader)", func(t *testing.T) {
-		resp, err := http.Get(ts.URL + "/admin/api/v1/usage/daily")
+	t.Run("daily includes persisted usage", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/admin/api/v1/usage/daily?days=7")
 		require.NoError(t, err)
 		defer closeBody(resp)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 
 		var daily []usage.DailyUsage
 		require.NoError(t, json.Unmarshal(body, &daily))
-		assert.Empty(t, daily)
+		require.NotEmpty(t, daily)
+
+		var todayEntry *usage.DailyUsage
+		for i := range daily {
+			if daily[i].Date == today || daily[i].Date == yesterday {
+				todayEntry = &daily[i]
+				break
+			}
+		}
+		require.NotNil(t, todayEntry, "expected daily usage entry for %s or %s", today, yesterday)
+		assert.Equal(t, expectedRequests, todayEntry.Requests)
+		assert.Equal(t, expectedInputTokens, todayEntry.InputTokens)
+		assert.Equal(t, expectedOutputTokens, todayEntry.OutputTokens)
+		assert.Equal(t, expectedTotalTokens, todayEntry.TotalTokens)
 	})
 
 	t.Run("query params accepted", func(t *testing.T) {
@@ -264,6 +255,9 @@ func TestAdminAPI_UsageEndpoints_E2E(t *testing.T) {
 		require.NoError(t, err)
 		defer closeBody(resp)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var weekly []usage.DailyUsage
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&weekly))
 	})
 }
