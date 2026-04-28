@@ -411,16 +411,110 @@ func TestResolve_ReverseIndexNotBuilt(t *testing.T) {
 		ProviderModels: map[string]ProviderModelEntry{
 			"openai/gpt-4o": {
 				ModelRef:      "gpt-4o",
-				CustomModelID: new("gpt-4o-2024-08-06"),
+				CustomModelID: new("gpt-4o-blue"),
 				Enabled:       true,
 			},
 		},
 		// providerModelByActualID is nil (buildReverseIndex not called)
 	}
 
-	meta := Resolve(list, "openai", "gpt-4o-2024-08-06")
+	meta := Resolve(list, "openai", "gpt-4o-blue")
 	if meta != nil {
 		t.Error("expected nil when reverse index is not built")
+	}
+}
+
+func TestResolve_ReleaseDateSuffixFallback(t *testing.T) {
+	list := &ModelList{
+		Models: map[string]ModelEntry{
+			"glm-5.1": {
+				DisplayName: "GLM 5.1",
+				Modes:       []string{"chat"},
+				Aliases: []string{
+					"z-ai/glm-5.1",
+					"openrouter/z-ai/glm-5.1",
+				},
+				Pricing: &core.ModelPricing{
+					Currency:      "USD",
+					InputPerMtok:  new(1.05),
+					OutputPerMtok: new(3.50),
+				},
+			},
+		},
+		ProviderModels: map[string]ProviderModelEntry{
+			"openrouter/glm-5.1": {
+				ModelRef: "glm-5.1",
+				Enabled:  true,
+				Pricing: &core.ModelPricing{
+					Currency:           "USD",
+					InputPerMtok:       new(1.05),
+					OutputPerMtok:      new(3.50),
+					CachedInputPerMtok: new(0.525),
+				},
+			},
+		},
+	}
+	list.buildReverseIndex()
+
+	for _, modelID := range []string{
+		"z-ai/glm-5.1-20260406",
+		"z-ai/glm-5.1-2026-04-06",
+		"z-ai/glm-5.1-2026",
+	} {
+		t.Run(modelID, func(t *testing.T) {
+			meta := Resolve(list, "openrouter", modelID)
+			if meta == nil {
+				t.Fatal("expected metadata via release-date suffix fallback")
+			}
+			if meta.Pricing == nil || meta.Pricing.CachedInputPerMtok == nil {
+				t.Fatal("expected OpenRouter provider pricing via fallback")
+			}
+			if *meta.Pricing.InputPerMtok != 1.05 {
+				t.Errorf("InputPerMtok = %f, want 1.05", *meta.Pricing.InputPerMtok)
+			}
+			if *meta.Pricing.CachedInputPerMtok != 0.525 {
+				t.Errorf("CachedInputPerMtok = %f, want 0.525", *meta.Pricing.CachedInputPerMtok)
+			}
+		})
+	}
+}
+
+func TestResolve_ReleaseDateSuffixFallbackExactMatchWins(t *testing.T) {
+	list := &ModelList{
+		Models: map[string]ModelEntry{
+			"glm-5.1": {
+				DisplayName: "GLM 5.1",
+				Modes:       []string{"chat"},
+			},
+		},
+		ProviderModels: map[string]ProviderModelEntry{
+			"openrouter/z-ai/glm-5.1-20260406": {
+				ModelRef: "glm-5.1",
+				Enabled:  true,
+				Pricing: &core.ModelPricing{
+					Currency:      "USD",
+					InputPerMtok:  new(2.00),
+					OutputPerMtok: new(4.00),
+				},
+			},
+			"openrouter/glm-5.1": {
+				ModelRef: "glm-5.1",
+				Enabled:  true,
+				Pricing: &core.ModelPricing{
+					Currency:      "USD",
+					InputPerMtok:  new(1.05),
+					OutputPerMtok: new(3.50),
+				},
+			},
+		},
+	}
+
+	meta := Resolve(list, "openrouter", "z-ai/glm-5.1-20260406")
+	if meta == nil || meta.Pricing == nil || meta.Pricing.InputPerMtok == nil {
+		t.Fatal("expected exact provider-model pricing")
+	}
+	if *meta.Pricing.InputPerMtok != 2.00 {
+		t.Errorf("InputPerMtok = %f, want exact dated provider price 2.00", *meta.Pricing.InputPerMtok)
 	}
 }
 

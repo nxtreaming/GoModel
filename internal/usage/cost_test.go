@@ -352,6 +352,27 @@ func TestCalculateGranularCost_Groq_PromptCachedTokensAndReasoningBreakdown(t *t
 	}
 }
 
+func TestCalculateGranularCost_OpenRouter_PromptCachedTokensAndReasoningBreakdown(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:       new(1.05),
+		OutputPerMtok:      new(3.50),
+		CachedInputPerMtok: new(0.525),
+		// ReasoningOutputPerMtok intentionally nil: base output rate covers the model.
+	}
+	rawData := map[string]any{
+		"prompt_cached_tokens":        136_128,
+		"completion_reasoning_tokens": 59,
+	}
+	result := CalculateGranularCost(161_490, 3_001, rawData, "openrouter", pricing)
+
+	assertCostNear(t, "InputCost", result.InputCost, 0.0980973)
+	assertCostNear(t, "OutputCost", result.OutputCost, 0.0105035)
+	assertCostNear(t, "TotalCost", result.TotalCost, 0.1086008)
+	if result.Caveat != "" {
+		t.Fatalf("expected no caveat for openrouter token details, got %q", result.Caveat)
+	}
+}
+
 func TestCalculateGranularCost_InformationalFieldsNoCaveat(t *testing.T) {
 	pricing := &core.ModelPricing{
 		InputPerMtok:  new(2.50),

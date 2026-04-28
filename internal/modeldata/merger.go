@@ -1,8 +1,20 @@
 package modeldata
 
 import (
+	"regexp"
+
 	"gomodel/internal/core"
 )
+
+// terminalReleaseDateSuffixPatterns are intentionally broad because provider
+// response IDs use mixed release suffixes: YYYYMMDD, YYYY-MM-DD, and four-digit
+// tokens that may be either YYYY or MMDD. These are only used after exact,
+// reverse-provider-model, and explicit alias lookup all fail.
+var terminalReleaseDateSuffixPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`[-_.]\d{8}$`),
+	regexp.MustCompile(`[-_.]\d{4}-\d{2}-\d{2}$`),
+	regexp.MustCompile(`[-_.]\d{4}$`),
+}
 
 // Resolve performs the three-layer merge to produce ModelMetadata for a given
 // provider type and model ID. It looks up provider_models[providerType/modelID]
@@ -29,7 +41,37 @@ func resolveEntries(list *ModelList, providerType string, modelID string) (*Mode
 	if model, pm := resolveReverseProviderModelID(list, providerType, modelID); model != nil || pm != nil {
 		return model, pm
 	}
-	return resolveAlias(list, providerType, modelID)
+	if model, pm := resolveAlias(list, providerType, modelID); model != nil || pm != nil {
+		return model, pm
+	}
+	return resolveReleaseDateAlias(list, providerType, modelID)
+}
+
+func resolveReleaseDateAlias(list *ModelList, providerType string, modelID string) (*ModelEntry, *ProviderModelEntry) {
+	stableID, ok := stripTerminalReleaseDateSuffix(modelID)
+	if !ok {
+		return nil, nil
+	}
+	if model, pm := resolveDirect(list, providerType, stableID); model != nil || pm != nil {
+		return model, pm
+	}
+	if model, pm := resolveReverseProviderModelID(list, providerType, stableID); model != nil || pm != nil {
+		return model, pm
+	}
+	return resolveAlias(list, providerType, stableID)
+}
+
+func stripTerminalReleaseDateSuffix(modelID string) (string, bool) {
+	// Strip one terminal release segment only. Repeated stripping could turn
+	// legitimate model names with date-like components into unrelated base IDs.
+	for _, pattern := range terminalReleaseDateSuffixPatterns {
+		loc := pattern.FindStringIndex(modelID)
+		if loc == nil || loc[0] == 0 {
+			continue
+		}
+		return modelID[:loc[0]], true
+	}
+	return "", false
 }
 
 func resolveDirect(list *ModelList, providerType string, modelID string) (*ModelEntry, *ProviderModelEntry) {
