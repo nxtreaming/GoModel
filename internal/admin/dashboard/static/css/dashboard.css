@@ -3846,6 +3846,58 @@ body.conversation-drawer-open {
   max-width: 460px;
 }
 
+.pricing-recalculate-section {
+  width: 100%;
+}
+
+.pricing-recalculate-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(260px, 360px);
+  align-items: end;
+  justify-content: start;
+  gap: 12px;
+  width: 100%;
+}
+
+.pricing-recalculate-date-field {
+  grid-column: 1 / -1;
+  max-width: 320px;
+  width: 100%;
+}
+
+.pricing-recalculate-filter-field {
+  max-width: 360px;
+  width: 100%;
+}
+
+.pricing-recalculate-date-field .date-picker,
+.pricing-recalculate-date-field .date-picker-trigger {
+  width: 100%;
+}
+
+.pricing-recalculate-date-field .date-picker-trigger {
+  justify-content: space-between;
+}
+
+@media (min-width: 769px) {
+  .pricing-recalculate-date-field .date-picker-dropdown {
+    top: auto;
+    bottom: calc(100% + 6px);
+    right: auto;
+    left: 0;
+  }
+}
+
+.pricing-recalculate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pricing-recalculate-dialog {
+  max-width: 480px;
+}
+
 .budget-override-dialog-backdrop {
   z-index: 100;
 }
@@ -4328,6 +4380,15 @@ body.conversation-drawer-open {
     width: 100%;
   }
   .budget-settings-actions .pagination-btn {
+    width: 100%;
+  }
+  .pricing-recalculate-grid {
+    grid-template-columns: 1fr;
+  }
+  .pricing-recalculate-actions {
+    width: 100%;
+  }
+  .pricing-recalculate-actions .pagination-btn {
     width: 100%;
   }
 

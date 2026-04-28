@@ -236,6 +236,8 @@ func extractInt(data map[string]any, key string) int {
 		return int(n)
 	case int:
 		return n
+	case int32:
+		return int(n)
 	case int64:
 		return int(n)
 	default:

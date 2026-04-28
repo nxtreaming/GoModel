@@ -1206,6 +1206,7 @@ test('fetchWorkflowRuntimeConfig loads FEATURE_FALLBACK_MODE from the admin conf
                     GUARDRAILS_ENABLED: 'on',
                     REDIS_URL: 'on',
                     SEMANTIC_CACHE_ENABLED: 'off',
+                    USAGE_PRICING_RECALCULATION_ENABLED: 'on',
                     UNRELATED_FLAG: 'ignored'
                 })
             });
@@ -1225,7 +1226,8 @@ test('fetchWorkflowRuntimeConfig loads FEATURE_FALLBACK_MODE from the admin conf
             BUDGETS_ENABLED: 'on',
             GUARDRAILS_ENABLED: 'on',
             REDIS_URL: 'on',
-            SEMANTIC_CACHE_ENABLED: 'off'
+            SEMANTIC_CACHE_ENABLED: 'off',
+            USAGE_PRICING_RECALCULATION_ENABLED: 'on'
         })
     );
 });

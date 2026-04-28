@@ -1718,6 +1718,7 @@ func TestDashboardConfig_ReturnsAllowlistedRuntimeFlags(t *testing.T) {
 		CacheEnabled:         "on",
 		RedisURL:             "on",
 		SemanticCacheEnabled: "off",
+		PricingRecalculation: "on",
 	}))
 	c, rec := newHandlerContext("/admin/api/v1/dashboard/config")
 
@@ -1755,6 +1756,9 @@ func TestDashboardConfig_ReturnsAllowlistedRuntimeFlags(t *testing.T) {
 	}
 	if got := body.SemanticCacheEnabled; got != "off" {
 		t.Fatalf("SEMANTIC_CACHE_ENABLED = %q, want off", got)
+	}
+	if got := body.PricingRecalculation; got != "on" {
+		t.Fatalf("USAGE_PRICING_RECALCULATION_ENABLED = %q, want on", got)
 	}
 	if rec.Body.String() == "" || strings.Contains(rec.Body.String(), "UNRELATED_FLAG") {
 		t.Fatal("UNRELATED_FLAG should not be exposed")
@@ -2328,6 +2332,32 @@ func TestParseUsageParams_DaysExplicit(t *testing.T) {
 	today := time.Now().UTC()
 	expectedEnd := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.UTC)
 	expectedStart := expectedEnd.AddDate(0, 0, -6)
+
+	if !params.StartDate.Equal(expectedStart) {
+		t.Errorf("expected start date %v, got %v", expectedStart, params.StartDate)
+	}
+	if !params.EndDate.Equal(expectedEnd) {
+		t.Errorf("expected end date %v, got %v", expectedEnd, params.EndDate)
+	}
+}
+
+func TestParseUsageParams_DaysClamped(t *testing.T) {
+	originalTimeNow := timeNow
+	timeNow = func() time.Time {
+		return time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	}
+	defer func() {
+		timeNow = originalTimeNow
+	}()
+
+	c := newContext("days=9999")
+	params, err := parseUsageParams(c)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedEnd := time.Date(2026, 4, 28, 0, 0, 0, 0, time.UTC)
+	expectedStart := expectedEnd.AddDate(0, 0, -(maxDateRangeDays - 1))
 
 	if !params.StartDate.Equal(expectedStart) {
 		t.Errorf("expected start date %v, got %v", expectedStart, params.StartDate)

@@ -126,6 +126,36 @@ func NewReader(store storage.Storage) (UsageReader, error) {
 	)
 }
 
+// NewPricingRecalculator creates a PricingRecalculator from a storage backend.
+// Returns nil if storage is nil.
+func NewPricingRecalculator(store storage.Storage) (PricingRecalculator, error) {
+	if store == nil {
+		return nil, nil
+	}
+
+	return storage.ResolveBackend[PricingRecalculator](
+		store,
+		func(db *sql.DB) (PricingRecalculator, error) {
+			if db == nil {
+				return nil, fmt.Errorf("database connection is required")
+			}
+			return &SQLiteStore{db: db}, nil
+		},
+		func(pool *pgxpool.Pool) (PricingRecalculator, error) {
+			if pool == nil {
+				return nil, fmt.Errorf("connection pool is required")
+			}
+			return &PostgreSQLStore{pool: pool}, nil
+		},
+		func(db *mongo.Database) (PricingRecalculator, error) {
+			if db == nil {
+				return nil, fmt.Errorf("database is required")
+			}
+			return &MongoDBStore{collection: db.Collection("usage")}, nil
+		},
+	)
+}
+
 // createUsageStore creates the appropriate UsageStore for the given storage backend.
 func createUsageStore(store storage.Storage, retentionDays int) (UsageStore, error) {
 	return storage.ResolveBackend[UsageStore](

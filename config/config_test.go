@@ -55,6 +55,7 @@ func clearAllConfigEnvVars(t *testing.T) {
 		"LOGGING_ONLY_MODEL_INTERACTIONS", "LOGGING_BUFFER_SIZE",
 		"LOGGING_FLUSH_INTERVAL", "LOGGING_RETENTION_DAYS",
 		"USAGE_ENABLED", "ENFORCE_RETURNING_USAGE_DATA",
+		"USAGE_PRICING_RECALCULATION_ENABLED",
 		"USAGE_BUFFER_SIZE", "USAGE_FLUSH_INTERVAL", "USAGE_RETENTION_DAYS",
 		"BUDGETS_ENABLED",
 		"GUARDRAILS_ENABLED", "ENABLE_GUARDRAILS_FOR_BATCH_PROCESSING",
@@ -162,6 +163,9 @@ func TestBuildDefaultConfig(t *testing.T) {
 	}
 	if !cfg.Usage.EnforceReturningUsageData {
 		t.Error("expected Usage.EnforceReturningUsageData=true")
+	}
+	if !cfg.Usage.PricingRecalculationEnabled {
+		t.Error("expected Usage.PricingRecalculationEnabled=true")
 	}
 	if cfg.Usage.BufferSize != 1000 {
 		t.Errorf("expected Usage.BufferSize=1000, got %d", cfg.Usage.BufferSize)
@@ -420,6 +424,28 @@ func TestLoadBudgetsEnabledDisablesBudgetsWhenUsageTrackingDisabledWithoutSeedBu
 		}
 		if result.Config.Budgets.Enabled {
 			t.Fatal("expected budgets to be disabled when usage tracking is disabled")
+		}
+	})
+}
+
+func TestLoadUsagePricingRecalculationFromYAML(t *testing.T) {
+	clearAllConfigEnvVars(t)
+
+	withTempDir(t, func(dir string) {
+		yaml := `
+usage:
+  pricing_recalculation_enabled: false
+`
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatalf("Failed to write config.yaml: %v", err)
+		}
+
+		result, err := Load()
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+		if result.Config.Usage.PricingRecalculationEnabled {
+			t.Fatal("expected usage pricing recalculation to be disabled from YAML")
 		}
 	})
 }
@@ -1122,6 +1148,7 @@ func TestLoad_EnvOverridesDefaults(t *testing.T) {
 		t.Setenv("MODELS_ENABLED_BY_DEFAULT", "false")
 		t.Setenv("KEEP_ONLY_ALIASES_AT_MODELS_ENDPOINT", "true")
 		t.Setenv("CONFIGURED_PROVIDER_MODELS_MODE", "allowlist")
+		t.Setenv("USAGE_PRICING_RECALCULATION_ENABLED", "false")
 		t.Setenv("STORAGE_TYPE", "postgresql")
 		t.Setenv("POSTGRES_URL", "postgres://localhost/test")
 		t.Setenv("POSTGRES_MAX_CONNS", "20")
@@ -1146,6 +1173,9 @@ func TestLoad_EnvOverridesDefaults(t *testing.T) {
 		}
 		if cfg.Models.ConfiguredProviderModelsMode != ConfiguredProviderModelsModeAllowlist {
 			t.Errorf("expected configured provider models mode allowlist from env, got %q", cfg.Models.ConfiguredProviderModelsMode)
+		}
+		if cfg.Usage.PricingRecalculationEnabled {
+			t.Error("expected usage pricing recalculation to be disabled from env")
 		}
 		if cfg.Storage.Type != "postgresql" {
 			t.Errorf("expected storage type postgresql, got %s", cfg.Storage.Type)

@@ -144,6 +144,63 @@
                  x-text="budgetSettingsError"></div>
         </div>
 
+        <div class="settings-refresh-section pricing-recalculate-section" x-show="pricingRecalculationEnabled()" x-cloak>
+            <div class="inline-help-section" x-data="{ open: false, copyId: 'pricing-recalculate-help-copy', showLabel: 'Show pricing recalculation help', hideLabel: 'Hide pricing recalculation help', text: 'Recalculate stored usage costs from the current model pricing metadata. Filters are applied to the selected date range, user path subtree, and provider/model selector or alias.' }">
+                <div class="inline-help-title-row">
+                    <h3>Usage Pricing Recalculation</h3>
+                    {{template "inline-help-toggle" .}}
+                </div>
+                <p :id="copyId" class="inline-help-copy" x-show="open" x-transition.opacity.duration.200ms x-text="text"></p>
+            </div>
+            <div class="pricing-recalculate-grid">
+                <div class="form-field pricing-recalculate-date-field">
+                    <label class="form-field-label" id="pricing-recalculate-date-label">Date Range</label>
+                    <div aria-labelledby="pricing-recalculate-date-label">
+                        {{template "date-picker" .}}
+                    </div>
+                </div>
+                <div class="form-field pricing-recalculate-filter-field">
+                    <label class="form-field-label" for="pricing-recalculate-user-path">User Path (optional)</label>
+                    <input id="pricing-recalculate-user-path"
+                           class="form-input"
+                           type="text"
+                           placeholder="/team/alpha"
+                           x-model="pricingRecalculateUserPath">
+                </div>
+                <div class="form-field pricing-recalculate-filter-field pricing-recalculate-selector-field">
+                    <label class="form-field-label" for="pricing-recalculate-selector">Provider/Model or Alias (optional)</label>
+                    <input id="pricing-recalculate-selector"
+                           class="form-input"
+                           type="text"
+                           placeholder="openai/gpt-4o or smart"
+                           x-model="pricingRecalculateSelector">
+                </div>
+            </div>
+            <div class="settings-refresh-actions pricing-recalculate-actions">
+                <button type="button"
+                        class="pagination-btn pagination-btn-danger pagination-btn-with-icon"
+                        :disabled="pricingRecalculateLoading || !pricingRecalculationEnabled()"
+                        :aria-busy="pricingRecalculateLoading ? 'true' : 'false'"
+                        aria-describedby="pricing-recalculate-help-copy"
+                        @click="openPricingRecalculateDialog()">
+                    <i data-lucide="calculator" class="form-action-icon" aria-hidden="true"></i>
+                    <span>Recalculate Pricing</span>
+                </button>
+            </div>
+        </div>
+        <div x-show="pricingRecalculationEnabled()" x-cloak>
+            <div class="alert alert-success settings-refresh-alert"
+                 role="status"
+                 aria-live="polite"
+                 x-show="pricingRecalculateNotice"
+                 x-text="pricingRecalculateNotice"></div>
+            <div class="alert alert-warning settings-refresh-alert"
+                 role="alert"
+                 aria-live="assertive"
+                 x-show="pricingRecalculateError"
+                 x-text="pricingRecalculateError"></div>
+        </div>
+
         <div class="settings-refresh-section">
             <div class="inline-help-section" x-data="{ open: false, copyId: 'runtime-refresh-help-copy', showLabel: 'Show runtime refresh help', hideLabel: 'Hide runtime refresh help', text: 'Pull the latest model metadata, provider inventory, API keys, aliases, model access rules, guardrails, and workflows.' }">
                 <div class="inline-help-title-row">
@@ -187,49 +244,6 @@
                 </template>
             </ul>
         </div>
-    </div>
-    <div class="auth-dialog-backdrop"
-         x-cloak
-         x-show="budgetResetDialogOpen"
-         x-transition.opacity.duration.160ms
-         aria-hidden="true"></div>
-    <div class="auth-dialog-shell"
-         x-cloak
-         x-show="budgetResetDialogOpen"
-         x-transition.opacity.duration.160ms
-         @click="closeBudgetResetDialog()"
-         @keydown.escape.window="!authDialogOpen && budgetResetDialogOpen && closeBudgetResetDialog()">
-        <section class="auth-dialog budget-reset-dialog"
-                 role="dialog"
-                 aria-modal="true"
-                 aria-labelledby="budgetResetDialogTitle"
-                 @click.stop>
-            <div class="auth-dialog-header">
-                <h2 id="budgetResetDialogTitle">Reset Budgets</h2>
-                <button type="button" class="auth-dialog-close dialog-close-btn" aria-label="Close budget reset dialog" @click="closeBudgetResetDialog()">
-                    {{template "x-icon"}}
-                </button>
-            </div>
-            <form class="auth-dialog-form" @submit.prevent="resetBudgets()">
-                <div class="form-field">
-                    <label class="form-field-label" for="budget-reset-confirmation">Type reset to confirm</label>
-                    <input id="budget-reset-confirmation"
-                           class="form-input"
-                           type="text"
-                           autocomplete="off"
-                           x-model="budgetResetConfirmation">
-                </div>
-                <div class="auth-dialog-actions">
-                    <button type="button" class="pagination-btn" @click="closeBudgetResetDialog()">Cancel</button>
-                    <button type="submit"
-                            class="pagination-btn pagination-btn-danger pagination-btn-with-icon"
-                            :disabled="budgetResetLoading || String(budgetResetConfirmation || '').trim().toLowerCase() !== 'reset'">
-                        <i data-lucide="rotate-ccw" class="form-action-icon" aria-hidden="true"></i>
-                        <span>Reset All Budgets</span>
-                    </button>
-                </div>
-            </form>
-        </section>
     </div>
 </div>
 </template>

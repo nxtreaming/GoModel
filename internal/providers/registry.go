@@ -1445,17 +1445,87 @@ func (r *ModelRegistry) GetModelMetadata(modelID string) *core.ModelMetadata {
 // and falling back to a reverse-index lookup via the model list.
 // Returns nil if no pricing is available.
 func (r *ModelRegistry) ResolvePricing(model, providerType string) *core.ModelPricing {
+	providerSelector := strings.TrimSpace(providerType)
+	if meta := r.getProviderModelMetadata(providerSelector, model); meta != nil && meta.Pricing != nil {
+		return meta.Pricing
+	}
+
 	meta := r.GetModelMetadata(model)
 	if meta != nil && meta.Pricing != nil {
 		return meta.Pricing
 	}
-	if providerType != "" {
-		meta = r.ResolveMetadata(providerType, model)
+	if providerSelector != "" {
+		meta = r.ResolveMetadata(r.metadataProviderType(providerSelector), r.metadataModelID(model))
 		if meta != nil && meta.Pricing != nil {
 			return meta.Pricing
 		}
 	}
 	return nil
+}
+
+func (r *ModelRegistry) getProviderModelMetadata(providerSelector, model string) *core.ModelMetadata {
+	providerSelector = strings.TrimSpace(providerSelector)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+
+	modelProviderName, modelID := splitModelSelector(model)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if modelProviderName != "" {
+		if meta := metadataFromProviderModel(r.modelsByProvider[modelProviderName], modelID); meta != nil {
+			return meta
+		}
+		if r.hasConfiguredProviderNameLocked(modelProviderName) {
+			return nil
+		}
+	}
+
+	if providerSelector == "" {
+		return nil
+	}
+	if meta := metadataFromProviderModel(r.modelsByProvider[providerSelector], model); meta != nil {
+		return meta
+	}
+	return nil
+}
+
+func metadataFromProviderModel(providerModels map[string]*ModelInfo, model string) *core.ModelMetadata {
+	if len(providerModels) == 0 {
+		return nil
+	}
+	info := providerModels[strings.TrimSpace(model)]
+	if info == nil {
+		return nil
+	}
+	return info.Model.Metadata
+}
+
+func (r *ModelRegistry) metadataProviderType(providerSelector string) string {
+	providerSelector = strings.TrimSpace(providerSelector)
+	if providerSelector == "" {
+		return ""
+	}
+	if providerType := r.GetProviderTypeForName(providerSelector); providerType != "" {
+		return providerType
+	}
+	return providerSelector
+}
+
+func (r *ModelRegistry) metadataModelID(model string) string {
+	model = strings.TrimSpace(model)
+	providerName, modelID := splitModelSelector(model)
+	if providerName == "" {
+		return model
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.hasConfiguredProviderNameLocked(providerName) {
+		return modelID
+	}
+	return model
 }
 
 // snapshotProviderTypes returns a copy of the providerTypes map for use outside the lock.

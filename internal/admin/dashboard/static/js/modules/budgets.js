@@ -826,15 +826,45 @@
                 this.budgetResetConfirmation = '';
                 this.budgetSettingsError = '';
                 this.budgetResetDialogOpen = true;
-                setTimeout(() => {
-                    const input = document.getElementById('budget-reset-confirmation');
-                    if (input && typeof input.focus === 'function') {
-                        input.focus();
-                    }
-                }, 0);
+                if (typeof this.openTypedConfirmationDialog === 'function') {
+                    this.openTypedConfirmationDialog({
+                        title: 'Reset Budgets',
+                        titleId: 'budgetResetDialogTitle',
+                        inputId: 'budget-reset-confirmation',
+                        requiredText: 'reset',
+                        confirmLabel: 'Reset All Budgets',
+                        icon: 'rotate-ccw',
+                        dialogClass: 'budget-reset-dialog',
+                        loadingKey: 'budgetResetLoading',
+                        errorKey: 'budgetSettingsError',
+                        onConfirm: () => this.resetBudgets(),
+                        onClose: () => {
+                            this.budgetResetDialogOpen = false;
+                            this.budgetResetConfirmation = '';
+                        }
+                    });
+                } else {
+                    setTimeout(() => {
+                        const input = document.getElementById('budget-reset-confirmation');
+                        if (input && typeof input.focus === 'function') {
+                            input.focus();
+                        }
+                    }, 0);
+                }
+            },
+
+            budgetResetConfirmationValue() {
+                if (this.typedConfirmationDialog && this.typedConfirmationDialog.open) {
+                    return this.typedConfirmationDialog.value;
+                }
+                return this.budgetResetConfirmation;
             },
 
             closeBudgetResetDialog() {
+                if (this.typedConfirmationDialog && this.typedConfirmationDialog.open && typeof this.closeTypedConfirmationDialog === 'function') {
+                    this.closeTypedConfirmationDialog();
+                    return;
+                }
                 this.budgetResetDialogOpen = false;
                 this.budgetResetConfirmation = '';
             },
@@ -843,7 +873,9 @@
                 if (this.budgetResetLoading) {
                     return;
                 }
-                if (String(this.budgetResetConfirmation || '').trim().toLowerCase() !== 'reset') {
+                const confirmation = this.budgetResetConfirmationValue();
+                this.budgetResetConfirmation = confirmation;
+                if (String(confirmation || '').trim().toLowerCase() !== 'reset') {
                     this.budgetSettingsError = 'Type reset to confirm.';
                     return;
                 }

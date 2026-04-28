@@ -33,6 +33,7 @@ import (
 // Handler serves admin API endpoints.
 type Handler struct {
 	usageReader         usage.UsageReader
+	usageRecalculator   usage.PricingRecalculator
 	auditReader         auditlog.Reader
 	registry            *providers.ModelRegistry
 	authKeys            *authkeys.Service
@@ -47,6 +48,7 @@ type Handler struct {
 	configuredProviders []providers.SanitizedProviderConfig
 
 	mutationMu sync.Mutex
+	pricingMu  sync.Mutex
 }
 
 // Option configures the admin API handler.
@@ -61,6 +63,7 @@ const (
 	DashboardConfigCacheEnabled         = "CACHE_ENABLED"
 	DashboardConfigRedisURL             = "REDIS_URL"
 	DashboardConfigSemanticCacheEnabled = "SEMANTIC_CACHE_ENABLED"
+	DashboardConfigPricingRecalculation = "USAGE_PRICING_RECALCULATION_ENABLED"
 )
 
 // statusClientClosedRequest is the de facto status used by proxies for client-aborted requests.
@@ -76,6 +79,7 @@ type DashboardConfigResponse struct {
 	CacheEnabled         string `json:"CACHE_ENABLED,omitempty"`
 	RedisURL             string `json:"REDIS_URL,omitempty"`
 	SemanticCacheEnabled string `json:"SEMANTIC_CACHE_ENABLED,omitempty"`
+	PricingRecalculation string `json:"USAGE_PRICING_RECALCULATION_ENABLED,omitempty"`
 }
 
 type providerStatusSummaryResponse struct {
@@ -150,6 +154,13 @@ type RuntimeRefresher interface {
 func WithAuditReader(reader auditlog.Reader) Option {
 	return func(h *Handler) {
 		h.auditReader = reader
+	}
+}
+
+// WithUsagePricingRecalculator enables persisted usage pricing recalculation.
+func WithUsagePricingRecalculator(recalculator usage.PricingRecalculator) Option {
+	return func(h *Handler) {
+		h.usageRecalculator = recalculator
 	}
 }
 
@@ -252,6 +263,7 @@ func normalizeDashboardRuntimeConfig(values DashboardConfigResponse) DashboardCo
 		CacheEnabled:         strings.TrimSpace(values.CacheEnabled),
 		RedisURL:             strings.TrimSpace(values.RedisURL),
 		SemanticCacheEnabled: strings.TrimSpace(values.SemanticCacheEnabled),
+		PricingRecalculation: strings.TrimSpace(values.PricingRecalculation),
 	}
 }
 
@@ -283,6 +295,8 @@ var validIntervals = map[string]bool{
 const (
 	dashboardTimeZoneHeader = "X-GoModel-Timezone"
 	defaultDashboardTZ      = "UTC"
+	defaultDateRangeDays    = 30
+	maxDateRangeDays        = 365
 )
 
 var timeNow = time.Now
@@ -330,49 +344,67 @@ func parseDateRangeParams(c *echo.Context) (usage.UsageQueryParams, error) {
 	now := timeNow().In(location)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
 
-	startStr := c.QueryParam("start_date")
-	endStr := c.QueryParam("end_date")
+	days := defaultDateRangeDays
+	if d := c.QueryParam("days"); d != "" {
+		if parsed, err := strconv.Atoi(d); err == nil && parsed > 0 {
+			days = min(parsed, maxDateRangeDays)
+		}
+	}
 
+	start, end, err := buildDateRange(strings.TrimSpace(c.QueryParam("start_date")), strings.TrimSpace(c.QueryParam("end_date")), days, location, today)
+	if err != nil {
+		return params, err
+	}
+	params.StartDate = start
+	params.EndDate = end
+	return params, nil
+}
+
+func buildDateRange(startStr, endStr string, days int, location *time.Location, today time.Time) (time.Time, time.Time, error) {
+	var start, end time.Time
 	var startParsed, endParsed bool
 
 	if startStr != "" {
 		t, err := time.ParseInLocation("2006-01-02", startStr, location)
 		if err != nil {
-			return params, core.NewInvalidRequestError("invalid start_date format, expected YYYY-MM-DD", nil)
+			return time.Time{}, time.Time{}, core.NewInvalidRequestError("invalid start_date format, expected YYYY-MM-DD", nil)
 		}
-		params.StartDate = t
+		start = t
 		startParsed = true
 	}
-
 	if endStr != "" {
 		t, err := time.ParseInLocation("2006-01-02", endStr, location)
 		if err != nil {
-			return params, core.NewInvalidRequestError("invalid end_date format, expected YYYY-MM-DD", nil)
+			return time.Time{}, time.Time{}, core.NewInvalidRequestError("invalid end_date format, expected YYYY-MM-DD", nil)
 		}
-		params.EndDate = t
+		end = t
 		endParsed = true
 	}
 
 	if startParsed || endParsed {
 		if !startParsed {
-			params.StartDate = params.EndDate.AddDate(0, 0, -29)
+			start = end.AddDate(0, 0, -29)
 		}
 		if !endParsed {
-			params.EndDate = today
+			end = today
 		}
-		return params, nil
+	} else {
+		days = normalizeDateRangeDays(days)
+		end = today
+		start = today.AddDate(0, 0, -(days - 1))
 	}
 
-	days := 30
-	if d := c.QueryParam("days"); d != "" {
-		if parsed, err := strconv.Atoi(d); err == nil && parsed > 0 {
-			days = parsed
-		}
+	if start.After(end) {
+		return time.Time{}, time.Time{}, core.NewInvalidRequestError("start_date must be on or before end_date", nil)
 	}
-	params.EndDate = today
-	params.StartDate = today.AddDate(0, 0, -(days - 1))
+	return start, end, nil
+}
 
-	return params, nil
+func normalizeDateRangeDays(days int) int {
+	if days <= 0 {
+		return defaultDateRangeDays
+	}
+	return min(days, maxDateRangeDays)
 }
 
 func dashboardTimeZone(c *echo.Context) (string, *time.Location) {
@@ -655,6 +687,57 @@ func (h *Handler) UsageLog(c *echo.Context) error {
 		result.Entries = []usage.UsageLogEntry{}
 	}
 
+	return c.JSON(http.StatusOK, result)
+}
+
+// RecalculateUsagePricing handles POST /admin/api/v1/usage/recalculate-pricing.
+//
+// @Summary      Recalculate stored usage costs from current model pricing metadata
+// @Tags         admin
+// @Accept       json
+// @Produce      json
+// @Security     BearerAuth
+// @Param        request  body      recalculatePricingRequest       true  "Recalculation filters and confirmation"
+// @Success      200      {object}  usage.RecalculatePricingResult
+// @Failure      400      {object}  core.GatewayError
+// @Failure      401      {object}  core.GatewayError
+// @Failure      500      {object}  core.GatewayError
+// @Failure      503      {object}  core.GatewayError
+// @Router       /admin/api/v1/usage/recalculate-pricing [post]
+func (h *Handler) RecalculateUsagePricing(c *echo.Context) error {
+	if h.usageRecalculator == nil {
+		return handleError(c, featureUnavailableError("usage pricing recalculation is unavailable"))
+	}
+	if h.registry == nil {
+		return handleError(c, featureUnavailableError("model pricing metadata is unavailable"))
+	}
+
+	var req recalculatePricingRequest
+	if err := c.Bind(&req); err != nil {
+		return handleError(c, core.NewInvalidRequestError("invalid request body: "+err.Error(), err))
+	}
+	if strings.TrimSpace(strings.ToLower(req.confirmationValue())) != "recalculate" {
+		return handleError(c, core.NewInvalidRequestError("confirmation must be recalculate", nil))
+	}
+
+	params, err := h.recalculatePricingParams(c, req)
+	if err != nil {
+		return handleError(c, err)
+	}
+
+	h.pricingMu.Lock()
+	defer h.pricingMu.Unlock()
+
+	result, err := h.usageRecalculator.RecalculatePricing(c.Request().Context(), params, h.registry)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return handleError(c, err)
+		}
+		if gatewayErr, ok := errors.AsType[*core.GatewayError](err); ok {
+			return handleError(c, gatewayErr)
+		}
+		return handleError(c, core.NewProviderError("usage", http.StatusInternalServerError, "failed to recalculate usage pricing", err))
+	}
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -1456,6 +1539,23 @@ type updateBudgetSettingsRequest struct {
 	MonthlyResetMinute *int `json:"monthly_reset_minute"`
 }
 
+type recalculatePricingRequest struct {
+	Days         int    `json:"days,omitempty"`
+	StartDate    string `json:"start_date,omitempty"`
+	EndDate      string `json:"end_date,omitempty"`
+	UserPath     string `json:"user_path,omitempty"`
+	Selector     string `json:"selector,omitempty"`
+	Confirmation string `json:"confirmation"`
+	Confirm      string `json:"confirm,omitempty"`
+}
+
+func (r recalculatePricingRequest) confirmationValue() string {
+	if strings.TrimSpace(r.Confirmation) != "" {
+		return r.Confirmation
+	}
+	return r.Confirm
+}
+
 func (r updateBudgetSettingsRequest) apply(settings budget.Settings) budget.Settings {
 	if r.DailyResetHour != nil {
 		settings.DailyResetHour = *r.DailyResetHour
@@ -1498,6 +1598,75 @@ func (r resetBudgetsRequest) confirmationValue() string {
 
 type resetBudgetsResponse struct {
 	Status string `json:"status"`
+}
+
+func (h *Handler) recalculatePricingParams(c *echo.Context, req recalculatePricingRequest) (usage.RecalculatePricingParams, error) {
+	baseParams, err := recalculatePricingDateParams(c, req)
+	if err != nil {
+		return usage.RecalculatePricingParams{}, err
+	}
+
+	userPath, err := normalizeUserPathQueryParam("user_path", req.UserPath)
+	if err != nil {
+		return usage.RecalculatePricingParams{}, err
+	}
+	baseParams.UserPath = userPath
+	baseParams.CacheMode = usage.CacheModeAll
+
+	provider, model, err := h.recalculatePricingSelector(req.Selector)
+	if err != nil {
+		return usage.RecalculatePricingParams{}, err
+	}
+
+	return usage.RecalculatePricingParams{
+		UsageQueryParams: baseParams,
+		Provider:         provider,
+		Model:            model,
+	}, nil
+}
+
+func recalculatePricingDateParams(c *echo.Context, req recalculatePricingRequest) (usage.UsageQueryParams, error) {
+	var params usage.UsageQueryParams
+
+	timeZone, location := dashboardTimeZone(c)
+	params.TimeZone = timeZone
+
+	now := timeNow().In(location)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+
+	start, end, err := buildDateRange(strings.TrimSpace(req.StartDate), strings.TrimSpace(req.EndDate), normalizeDateRangeDays(req.Days), location, today)
+	if err != nil {
+		return params, err
+	}
+	params.StartDate = start
+	params.EndDate = end
+	return params, nil
+}
+
+func (h *Handler) recalculatePricingSelector(raw string) (provider, model string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", nil
+	}
+
+	if h.aliases != nil {
+		selector, changed, err := h.aliases.ResolveModel(core.NewRequestedModelSelector(raw, ""))
+		if err != nil {
+			return "", "", core.NewInvalidRequestError("invalid selector: "+err.Error(), err)
+		}
+		if changed {
+			return selector.Provider, selector.Model, nil
+		}
+	}
+
+	selector, err := core.ParseModelSelector(raw, "")
+	if err != nil {
+		return "", "", core.NewInvalidRequestError("invalid selector: "+err.Error(), err)
+	}
+	if selector.Provider == "" {
+		return "", "", core.NewInvalidRequestError("invalid selector: provider/model or alias is required", nil)
+	}
+	return selector.Provider, selector.Model, nil
 }
 
 func budgetStatusResponses(statuses []budget.CheckResult, now time.Time) []budgetStatusResponse {

@@ -82,7 +82,11 @@ logging:
   only_model_interactions: true
 
 usage:
+  # Usage actions require USAGE_ENABLED=true (or usage.enabled: true) and a supported
+  # storage backend; pricing recalculation appears only when both usage tracking and
+  # pricing_recalculation_enabled are enabled.
   enabled: true
+  pricing_recalculation_enabled: true
   enforce_returning_usage_data: true
   buffer_size: 1000
   flush_interval: 5

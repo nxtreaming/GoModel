@@ -70,6 +70,22 @@ function dashboard() {
     needsAuth: false,
     apiKey: "",
     authDialogOpen: false,
+    typedConfirmationDialog: {
+      open: false,
+      title: "",
+      titleId: "typedConfirmationDialogTitle",
+      inputId: "typed-confirmation-input",
+      message: "",
+      requiredText: "",
+      value: "",
+      confirmLabel: "Confirm",
+      icon: "alert-triangle",
+      dialogClass: "",
+      loadingKey: "",
+      errorKey: "",
+      onConfirm: null,
+      onClose: null,
+    },
     authRequestGeneration: 0,
     theme: "system",
     sidebarCollapsed: false,
@@ -391,8 +407,96 @@ function dashboard() {
         (this.page === "guardrails" && this.guardrailFormOpen) ||
         (this.page === "auth-keys" && this.authKeyFormOpen) ||
         (this.page === "budgets" && this.budgetFormOpen) ||
-        this.budgetResetDialogOpen
+        this.budgetResetDialogOpen ||
+        this.pricingRecalculateDialogOpen ||
+        (this.typedConfirmationDialog && this.typedConfirmationDialog.open)
       );
+    },
+
+    openTypedConfirmationDialog(options) {
+      const next = {
+        open: true,
+        title: "",
+        titleId: "typedConfirmationDialogTitle",
+        inputId: "typed-confirmation-input",
+        message: "",
+        requiredText: "",
+        value: "",
+        confirmLabel: "Confirm",
+        icon: "alert-triangle",
+        dialogClass: "",
+        loadingKey: "",
+        errorKey: "",
+        onConfirm: null,
+        onClose: null,
+        ...(options || {}),
+      };
+      this.typedConfirmationDialog = next;
+      setTimeout(() => {
+        const input = document.getElementById(next.inputId);
+        if (input && typeof input.focus === "function") {
+          input.focus();
+        }
+        if (typeof this.renderIconsAfterUpdate === "function") {
+          this.renderIconsAfterUpdate();
+        }
+      }, 0);
+    },
+
+    closeTypedConfirmationDialog() {
+      const current = this.typedConfirmationDialog || {};
+      if (typeof current.onClose === "function") {
+        current.onClose.call(this);
+      }
+      this.typedConfirmationDialog = {
+        open: false,
+        title: "",
+        titleId: "typedConfirmationDialogTitle",
+        inputId: "typed-confirmation-input",
+        message: "",
+        requiredText: "",
+        value: "",
+        confirmLabel: "Confirm",
+        icon: "alert-triangle",
+        dialogClass: "",
+        loadingKey: "",
+        errorKey: "",
+        onConfirm: null,
+        onClose: null,
+      };
+    },
+
+    typedConfirmationReady() {
+      const dialog = this.typedConfirmationDialog || {};
+      return (
+        String(dialog.value || "").trim().toLowerCase() ===
+        String(dialog.requiredText || "").trim().toLowerCase()
+      );
+    },
+
+    typedConfirmationLoading() {
+      const dialog = this.typedConfirmationDialog || {};
+      const key = String(dialog.loadingKey || "").trim();
+      return key ? !!this[key] : false;
+    },
+
+    typedConfirmationInputLabel() {
+      const dialog = this.typedConfirmationDialog || {};
+      return "Type " + String(dialog.requiredText || "").trim() + " to confirm";
+    },
+
+    async submitTypedConfirmationDialog() {
+      const dialog = this.typedConfirmationDialog || {};
+      if (!this.typedConfirmationReady()) {
+        const errorKey = String(dialog.errorKey || "").trim();
+        if (errorKey) {
+          this[errorKey] = this.typedConfirmationInputLabel() + ".";
+        }
+        return;
+      }
+      if (typeof dialog.onConfirm === "function") {
+        await dialog.onConfirm.call(this);
+      }
     },
 
     submitApiKey() {
@@ -969,6 +1073,12 @@ function dashboard() {
         ? dashboardBudgetsModule
         : null,
       "dashboardBudgetsModule",
+    ),
+    resolveModuleFactory(
+      typeof dashboardPricingModule === "function"
+        ? dashboardPricingModule
+        : null,
+      "dashboardPricingModule",
     ),
     resolveModuleFactory(
       typeof dashboardWorkflowsModule === "function"

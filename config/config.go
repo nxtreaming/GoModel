@@ -365,6 +365,11 @@ type UsageConfig struct {
 	// Default: true
 	EnforceReturningUsageData bool `yaml:"enforce_returning_usage_data" env:"ENFORCE_RETURNING_USAGE_DATA"`
 
+	// PricingRecalculationEnabled controls whether the admin pricing recalculation action is available.
+	// Storage and pricing metadata support are still required; false always disables the feature.
+	// Default: true
+	PricingRecalculationEnabled bool `yaml:"pricing_recalculation_enabled" env:"USAGE_PRICING_RECALCULATION_ENABLED"`
+
 	// BufferSize is the number of usage entries to buffer before flushing
 	// Default: 1000
 	BufferSize int `yaml:"buffer_size" env:"USAGE_BUFFER_SIZE"`
@@ -1036,11 +1041,12 @@ func buildDefaultConfig() *Config {
 			OnlyModelInteractions: true,
 		},
 		Usage: UsageConfig{
-			Enabled:                   true,
-			EnforceReturningUsageData: true,
-			BufferSize:                1000,
-			FlushInterval:             5,
-			RetentionDays:             90,
+			Enabled:                     true,
+			EnforceReturningUsageData:   true,
+			PricingRecalculationEnabled: true,
+			BufferSize:                  1000,
+			FlushInterval:               5,
+			RetentionDays:               90,
 		},
 		Budgets: BudgetsConfig{
 			Enabled: true,

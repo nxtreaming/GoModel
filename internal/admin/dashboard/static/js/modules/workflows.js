@@ -88,7 +88,8 @@
 	                    'GUARDRAILS_ENABLED',
 	                    'CACHE_ENABLED',
 	                    'REDIS_URL',
-	                    'SEMANTIC_CACHE_ENABLED'
+	                    'SEMANTIC_CACHE_ENABLED',
+	                    'USAGE_PRICING_RECALCULATION_ENABLED'
 	                ];
 	            },
 

@@ -21,10 +21,11 @@ const (
 
 // SQLiteStore implements UsageStore for SQLite databases.
 type SQLiteStore struct {
-	db            *sql.DB
-	retentionDays int
-	stopCleanup   chan struct{}
-	closeOnce     sync.Once
+	db                     *sql.DB
+	retentionDays          int
+	recalculationBatchSize int
+	stopCleanup            chan struct{}
+	closeOnce              sync.Once
 }
 
 // NewSQLiteStore creates a new SQLite usage store.
@@ -97,9 +98,10 @@ func NewSQLiteStore(db *sql.DB, retentionDays int) (*SQLiteStore, error) {
 	}
 
 	store := &SQLiteStore{
-		db:            db,
-		retentionDays: retentionDays,
-		stopCleanup:   make(chan struct{}),
+		db:                     db,
+		retentionDays:          retentionDays,
+		recalculationBatchSize: defaultSQLiteRecalculationBatchSize,
+		stopCleanup:            make(chan struct{}),
 	}
 
 	// Start background cleanup if retention is configured

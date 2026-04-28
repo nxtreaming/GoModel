@@ -509,3 +509,52 @@ func TestDashboardRuntimeConfig_HidesCacheAnalyticsWhenUsageDisabled(t *testing.
 		t.Fatalf("dashboardRuntimeConfig()[%q] = %q, want on", admin.DashboardConfigRedisURL, got)
 	}
 }
+
+func TestUsagePricingRecalculationConfigured(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{
+			name: "enabled",
+			cfg: &config.Config{
+				Usage: config.UsageConfig{
+					Enabled:                     true,
+					PricingRecalculationEnabled: true,
+				},
+			},
+			want: true,
+		},
+		{
+			name: "disabled by usage",
+			cfg: &config.Config{
+				Usage: config.UsageConfig{
+					Enabled:                     false,
+					PricingRecalculationEnabled: true,
+				},
+			},
+		},
+		{
+			name: "disabled by pricing switch",
+			cfg: &config.Config{
+				Usage: config.UsageConfig{
+					Enabled:                     true,
+					PricingRecalculationEnabled: false,
+				},
+			},
+		},
+		{
+			name: "nil config",
+			cfg:  nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := usagePricingRecalculationConfigured(test.cfg); got != test.want {
+				t.Fatalf("usagePricingRecalculationConfigured() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

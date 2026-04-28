@@ -782,6 +782,48 @@ func TestAdminAPI_SkipsAuthWithoutMasterKey(t *testing.T) {
 	}
 }
 
+func TestAdminPricingRecalculationRequiresAuthWithoutMasterKey(t *testing.T) {
+	mock := &mockProvider{}
+	adminHandler := admin.NewHandler(nil, nil)
+	unsafeSrv := New(mock, &Config{
+		AdminEndpointsEnabled: true,
+		AdminHandler:          adminHandler,
+	})
+	unsafeReq := httptest.NewRequest(http.MethodPost, "/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{"confirmation":"recalculate"}`))
+	unsafeReq.Header.Set("Content-Type", "application/json")
+	unsafeRec := httptest.NewRecorder()
+	unsafeSrv.ServeHTTP(unsafeRec, unsafeReq)
+
+	if unsafeRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected pricing recalculation 401 when no auth is configured, got %d body=%s", unsafeRec.Code, unsafeRec.Body.String())
+	}
+
+	srv := New(mock, &Config{
+		Authenticator:         mockAuthenticator{enabled: true, tokenToID: map[string]string{"managed-token": "key-123"}},
+		AdminEndpointsEnabled: true,
+		AdminHandler:          adminHandler,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{"confirmation":"recalculate"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected pricing recalculation 401 without auth, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	authReq := httptest.NewRequest(http.MethodPost, "/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{"confirmation":"recalculate"}`))
+	authReq.Header.Set("Content-Type", "application/json")
+	authReq.Header.Set("Authorization", "Bearer managed-token")
+	authRec := httptest.NewRecorder()
+	srv.ServeHTTP(authRec, authReq)
+
+	if authRec.Code == http.StatusUnauthorized {
+		t.Fatalf("expected authorized pricing recalculation request to reach handler, got 401 body=%s", authRec.Body.String())
+	}
+}
+
 func TestAdminStaticAssets_SkipAuth(t *testing.T) {
 	mock := &mockProvider{}
 	dashHandler := newDashboardHandler(t)

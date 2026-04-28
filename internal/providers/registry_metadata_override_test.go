@@ -125,6 +125,56 @@ func TestInitialize_OverrideMergesOnRemoteEnrichment(t *testing.T) {
 	}
 }
 
+func TestResolvePricingPrefersProviderSpecificMetadata(t *testing.T) {
+	registry := NewModelRegistry()
+
+	primary := &registryMockProvider{
+		name: "provider-primary",
+		modelsResponse: &core.ModelsResponse{
+			Object: "list",
+			Data: []core.Model{
+				{ID: "shared-model", Object: "model", OwnedBy: "openai"},
+			},
+		},
+	}
+	backup := &registryMockProvider{
+		name: "provider-backup",
+		modelsResponse: &core.ModelsResponse{
+			Object: "list",
+			Data: []core.Model{
+				{ID: "shared-model", Object: "model", OwnedBy: "openai"},
+			},
+		},
+	}
+	registry.RegisterProviderWithNameAndType(primary, "openai-primary", "openai")
+	registry.RegisterProviderWithNameAndType(backup, "openai-backup", "openai")
+
+	raw := []byte(`{"version":1,"updated_at":"2025-01-01T00:00:00Z","providers":{},"models":{},"provider_models":{}}`)
+	list, err := modeldata.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	registry.SetModelList(list, raw)
+
+	primaryRate := 1.0
+	backupRate := 2.0
+	registry.SetProviderMetadataOverrides("openai-primary", map[string]*core.ModelMetadata{
+		"shared-model": {Pricing: &core.ModelPricing{InputPerMtok: &primaryRate}},
+	})
+	registry.SetProviderMetadataOverrides("openai-backup", map[string]*core.ModelMetadata{
+		"shared-model": {Pricing: &core.ModelPricing{InputPerMtok: &backupRate}},
+	})
+
+	if err := registry.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	pricing := registry.ResolvePricing("shared-model", "openai-backup")
+	if pricing == nil || pricing.InputPerMtok == nil || *pricing.InputPerMtok != backupRate {
+		t.Fatalf("ResolvePricing(shared-model, openai-backup) = %+v, want backup pricing", pricing)
+	}
+}
+
 // TestApplyConfigMetadataOverrides_NoOpPreservesPointerIdentity verifies that
 // an override whose fields already match the current metadata does not
 // replace the ModelInfo pointer — a concurrent reader that captured the

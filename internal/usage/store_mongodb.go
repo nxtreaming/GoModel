@@ -45,8 +45,10 @@ var usagePartialWriteFailures = promauto.NewCounter(
 
 // MongoDBStore implements UsageStore for MongoDB.
 type MongoDBStore struct {
-	collection    *mongo.Collection
-	retentionDays int
+	collection                  *mongo.Collection
+	retentionDays               int
+	startPricingSession         func() (mongoPricingSession, error)
+	recalculatePricingDocuments func(context.Context, bson.D, PricingResolver) (RecalculatePricingResult, error)
 }
 
 // NewMongoDBStore creates a new MongoDB usage store.
