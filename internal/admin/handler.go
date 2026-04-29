@@ -1769,36 +1769,27 @@ func featureUnavailableError(message string) error {
 		WithCode("feature_unavailable")
 }
 
-func (h *Handler) aliasesUnavailableError() error {
-	return featureUnavailableError("aliases feature is unavailable")
-}
-
-func (h *Handler) modelOverridesUnavailableError() error {
-	return featureUnavailableError("model overrides feature is unavailable")
-}
-
-func (h *Handler) authKeysUnavailableError() error {
-	return featureUnavailableError("auth keys feature is unavailable")
-}
-
-func (h *Handler) guardrailsUnavailableError() error {
-	return featureUnavailableError("guardrails feature is unavailable")
-}
-
-func (h *Handler) workflowsUnavailableError() error {
-	return featureUnavailableError("workflows feature is unavailable")
-}
-
-func aliasWriteError(err error) error {
-	if err == nil {
-		return nil
+func validationWriter(isValidation func(error) bool) func(error) error {
+	return func(err error) error {
+		if err == nil {
+			return nil
+		}
+		if isValidation(err) {
+			return core.NewInvalidRequestError(err.Error(), err)
+		}
+		return err
 	}
-	if aliases.IsValidationError(err) {
-		return core.NewInvalidRequestError(err.Error(), err)
-	}
-	return err
 }
 
+var (
+	aliasWriteError     = validationWriter(aliases.IsValidationError)
+	workflowWriteError  = validationWriter(workflows.IsValidationError)
+	authKeyWriteError   = validationWriter(authkeys.IsValidationError)
+	guardrailWriteError = validationWriter(guardrails.IsValidationError)
+)
+
+// modelOverrideWriteError differs from the others: non-validation errors are
+// surfaced as 502 so the dashboard distinguishes provider failures from input issues.
 func modelOverrideWriteError(err error) error {
 	if err == nil {
 		return nil
@@ -1807,36 +1798,6 @@ func modelOverrideWriteError(err error) error {
 		return core.NewInvalidRequestError(err.Error(), err)
 	}
 	return core.NewProviderError("model_overrides", http.StatusBadGateway, err.Error(), err)
-}
-
-func workflowWriteError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if workflows.IsValidationError(err) {
-		return core.NewInvalidRequestError(err.Error(), err)
-	}
-	return err
-}
-
-func authKeyWriteError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if authkeys.IsValidationError(err) {
-		return core.NewInvalidRequestError(err.Error(), err)
-	}
-	return err
-}
-
-func guardrailWriteError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if guardrails.IsValidationError(err) {
-		return core.NewInvalidRequestError(err.Error(), err)
-	}
-	return err
 }
 
 func deactivateByID(
@@ -1897,7 +1858,7 @@ func deleteByName(
 // ListModelOverrides handles GET /admin/api/v1/model-overrides.
 func (h *Handler) ListModelOverrides(c *echo.Context) error {
 	if h.modelOverrides == nil {
-		return handleError(c, h.modelOverridesUnavailableError())
+		return handleError(c, featureUnavailableError("model overrides feature is unavailable"))
 	}
 	views := h.modelOverrides.ListViews()
 	if views == nil {
@@ -1909,7 +1870,7 @@ func (h *Handler) ListModelOverrides(c *echo.Context) error {
 // UpsertModelOverride handles PUT /admin/api/v1/model-overrides/{selector}.
 func (h *Handler) UpsertModelOverride(c *echo.Context) error {
 	if h.modelOverrides == nil {
-		return handleError(c, h.modelOverridesUnavailableError())
+		return handleError(c, featureUnavailableError("model overrides feature is unavailable"))
 	}
 
 	selector, err := decodeModelOverridePathSelector(c.Param("selector"))
@@ -1942,7 +1903,7 @@ func (h *Handler) DeleteModelOverride(c *echo.Context) error {
 	var unavailableErr error
 	var deleteFunc func(context.Context, string) error
 	if h.modelOverrides == nil {
-		unavailableErr = h.modelOverridesUnavailableError()
+		unavailableErr = featureUnavailableError("model overrides feature is unavailable")
 	} else {
 		deleteFunc = h.modelOverrides.Delete
 	}
@@ -1961,7 +1922,7 @@ func (h *Handler) DeleteModelOverride(c *echo.Context) error {
 // ListAuthKeys handles GET /admin/api/v1/auth-keys
 func (h *Handler) ListAuthKeys(c *echo.Context) error {
 	if h.authKeys == nil {
-		return handleError(c, h.authKeysUnavailableError())
+		return handleError(c, featureUnavailableError("auth keys feature is unavailable"))
 	}
 	views := h.authKeys.ListViews()
 	if views == nil {
@@ -1973,7 +1934,7 @@ func (h *Handler) ListAuthKeys(c *echo.Context) error {
 // CreateAuthKey handles POST /admin/api/v1/auth-keys
 func (h *Handler) CreateAuthKey(c *echo.Context) error {
 	if h.authKeys == nil {
-		return handleError(c, h.authKeysUnavailableError())
+		return handleError(c, featureUnavailableError("auth keys feature is unavailable"))
 	}
 
 	var req createAuthKeyRequest
@@ -2012,7 +1973,7 @@ func (h *Handler) DeactivateAuthKey(c *echo.Context) error {
 	var unavailableErr error
 	var deactivate func(context.Context, string) error
 	if h.authKeys == nil {
-		unavailableErr = h.authKeysUnavailableError()
+		unavailableErr = featureUnavailableError("auth keys feature is unavailable")
 	} else {
 		deactivate = h.authKeys.Deactivate
 	}
@@ -2022,7 +1983,7 @@ func (h *Handler) DeactivateAuthKey(c *echo.Context) error {
 // ListAliases handles GET /admin/api/v1/aliases
 func (h *Handler) ListAliases(c *echo.Context) error {
 	if h.aliases == nil {
-		return handleError(c, h.aliasesUnavailableError())
+		return handleError(c, featureUnavailableError("aliases feature is unavailable"))
 	}
 	views := h.aliases.ListViews()
 	if views == nil {
@@ -2034,7 +1995,7 @@ func (h *Handler) ListAliases(c *echo.Context) error {
 // UpsertAlias handles PUT /admin/api/v1/aliases/{name}
 func (h *Handler) UpsertAlias(c *echo.Context) error {
 	if h.aliases == nil {
-		return handleError(c, h.aliasesUnavailableError())
+		return handleError(c, featureUnavailableError("aliases feature is unavailable"))
 	}
 
 	name, err := decodeAliasPathName(c.Param("name"))
@@ -2077,7 +2038,7 @@ func (h *Handler) DeleteAlias(c *echo.Context) error {
 	var unavailableErr error
 	var deleteFunc func(context.Context, string) error
 	if h.aliases == nil {
-		unavailableErr = h.aliasesUnavailableError()
+		unavailableErr = featureUnavailableError("aliases feature is unavailable")
 	} else {
 		deleteFunc = h.aliases.Delete
 	}
@@ -2096,7 +2057,7 @@ func (h *Handler) DeleteAlias(c *echo.Context) error {
 // ListGuardrailTypes handles GET /admin/api/v1/guardrails/types
 func (h *Handler) ListGuardrailTypes(c *echo.Context) error {
 	if h.guardrailDefs == nil {
-		return handleError(c, h.guardrailsUnavailableError())
+		return handleError(c, featureUnavailableError("guardrails feature is unavailable"))
 	}
 	return c.JSON(http.StatusOK, h.guardrailDefs.TypeDefinitions())
 }
@@ -2104,7 +2065,7 @@ func (h *Handler) ListGuardrailTypes(c *echo.Context) error {
 // ListGuardrails handles GET /admin/api/v1/guardrails
 func (h *Handler) ListGuardrails(c *echo.Context) error {
 	if h.guardrailDefs == nil {
-		return handleError(c, h.guardrailsUnavailableError())
+		return handleError(c, featureUnavailableError("guardrails feature is unavailable"))
 	}
 	views := h.guardrailDefs.ListViews()
 	if views == nil {
@@ -2116,7 +2077,7 @@ func (h *Handler) ListGuardrails(c *echo.Context) error {
 // UpsertGuardrail handles PUT /admin/api/v1/guardrails/{name}
 func (h *Handler) UpsertGuardrail(c *echo.Context) error {
 	if h.guardrailDefs == nil {
-		return handleError(c, h.guardrailsUnavailableError())
+		return handleError(c, featureUnavailableError("guardrails feature is unavailable"))
 	}
 
 	name := strings.TrimSpace(c.Param("name"))
@@ -2160,7 +2121,7 @@ func (h *Handler) UpsertGuardrail(c *echo.Context) error {
 // DeleteGuardrail handles DELETE /admin/api/v1/guardrails/{name}
 func (h *Handler) DeleteGuardrail(c *echo.Context) error {
 	if h.guardrailDefs == nil {
-		return handleError(c, h.guardrailsUnavailableError())
+		return handleError(c, featureUnavailableError("guardrails feature is unavailable"))
 	}
 
 	name := strings.TrimSpace(c.Param("name"))
@@ -2195,7 +2156,7 @@ func (h *Handler) DeleteGuardrail(c *echo.Context) error {
 // ListWorkflows handles GET /admin/api/v1/workflows
 func (h *Handler) ListWorkflows(c *echo.Context) error {
 	if h.workflows == nil {
-		return handleError(c, h.workflowsUnavailableError())
+		return handleError(c, featureUnavailableError("workflows feature is unavailable"))
 	}
 
 	views, err := h.workflows.ListViews(c.Request().Context())
@@ -2211,7 +2172,7 @@ func (h *Handler) ListWorkflows(c *echo.Context) error {
 // GetWorkflow handles GET /admin/api/v1/workflows/:id
 func (h *Handler) GetWorkflow(c *echo.Context) error {
 	if h.workflows == nil {
-		return handleError(c, h.workflowsUnavailableError())
+		return handleError(c, featureUnavailableError("workflows feature is unavailable"))
 	}
 
 	id := strings.TrimSpace(c.Param("id"))
@@ -2242,7 +2203,7 @@ func (h *Handler) ListWorkflowGuardrails(c *echo.Context) error {
 // CreateWorkflow handles POST /admin/api/v1/workflows
 func (h *Handler) CreateWorkflow(c *echo.Context) error {
 	if h.workflows == nil {
-		return handleError(c, h.workflowsUnavailableError())
+		return handleError(c, featureUnavailableError("workflows feature is unavailable"))
 	}
 
 	var req createWorkflowRequest
@@ -2295,7 +2256,7 @@ func (h *Handler) CreateWorkflow(c *echo.Context) error {
 // DeactivateWorkflow handles POST /admin/api/v1/workflows/:id/deactivate
 func (h *Handler) DeactivateWorkflow(c *echo.Context) error {
 	if h.workflows == nil {
-		return handleError(c, h.workflowsUnavailableError())
+		return handleError(c, featureUnavailableError("workflows feature is unavailable"))
 	}
 
 	id := strings.TrimSpace(c.Param("id"))
