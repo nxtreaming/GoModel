@@ -37,6 +37,9 @@ type TestServerConfig struct {
 	// UsageEnabled enables usage tracking
 	UsageEnabled bool
 
+	// UsagePricingRecalculationEnabled enables admin usage pricing recalculation.
+	UsagePricingRecalculationEnabled bool
+
 	// BudgetsEnabled enables budget enforcement.
 	BudgetsEnabled bool
 
@@ -296,11 +299,12 @@ func buildAppConfig(t *testing.T, cfg TestServerConfig, mockLLMURL string, port 
 			OnlyModelInteractions: cfg.OnlyModelInteractions,
 		},
 		Usage: config.UsageConfig{
-			Enabled:                   cfg.UsageEnabled,
-			EnforceReturningUsageData: true,
-			BufferSize:                100,
-			FlushInterval:             1,
-			RetentionDays:             0,
+			Enabled:                     cfg.UsageEnabled,
+			EnforceReturningUsageData:   true,
+			PricingRecalculationEnabled: cfg.UsagePricingRecalculationEnabled,
+			BufferSize:                  100,
+			FlushInterval:               1,
+			RetentionDays:               0,
 		},
 		Budgets: config.BudgetsConfig{
 			Enabled:   cfg.BudgetsEnabled,

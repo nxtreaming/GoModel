@@ -102,20 +102,6 @@ func AuthMiddlewareWithAuthenticator(masterKey string, authenticator BearerToken
 	}
 }
 
-// RequireConfiguredAuthMiddleware enforces authentication even on routes that
-// are otherwise covered by a global auth skip path.
-func RequireConfiguredAuthMiddleware(masterKey string, authenticator BearerTokenAuthenticator) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
-			if masterKey == "" && (authenticator == nil || !authenticator.Enabled()) {
-				authErr := authenticationError(c, "authentication is required for this operation")
-				return c.JSON(authErr.HTTPStatusCode(), authErr.ToJSON())
-			}
-			return AuthMiddlewareWithAuthenticator(masterKey, authenticator, nil)(next)(c)
-		}
-	}
-}
-
 func authFailureMessage(err error) string {
 	if err == nil {
 		return "invalid API key"

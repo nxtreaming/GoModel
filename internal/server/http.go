@@ -323,7 +323,7 @@ func New(provider core.RoutableProvider, cfg *Config) *Server {
 		adminAPI.GET("/usage/models", cfg.AdminHandler.UsageByModel)
 		adminAPI.GET("/usage/user-paths", cfg.AdminHandler.UsageByUserPath)
 		adminAPI.GET("/usage/log", cfg.AdminHandler.UsageLog)
-		adminAPI.POST("/usage/recalculate-pricing", cfg.AdminHandler.RecalculateUsagePricing, RequireConfiguredAuthMiddleware(cfg.MasterKey, cfg.Authenticator))
+		adminAPI.POST("/usage/recalculate-pricing", cfg.AdminHandler.RecalculateUsagePricing)
 		adminAPI.GET("/audit/log", cfg.AdminHandler.AuditLog)
 		adminAPI.GET("/audit/conversation", cfg.AdminHandler.AuditConversation)
 		adminAPI.GET("/providers/status", cfg.AdminHandler.ProviderStatus)

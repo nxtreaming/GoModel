@@ -13,6 +13,8 @@ import (
 	"gomodel/internal/admin"
 	"gomodel/internal/admin/dashboard"
 	"gomodel/internal/core"
+	"gomodel/internal/providers"
+	"gomodel/internal/usage"
 
 	_ "gomodel/cmd/gomodel/docs"
 
@@ -585,6 +587,15 @@ func newDashboardHandler(t *testing.T) *dashboard.Handler {
 	return h
 }
 
+type pricingRecalculatorStub struct {
+	calls int
+}
+
+func (s *pricingRecalculatorStub) RecalculatePricing(context.Context, usage.RecalculatePricingParams, usage.PricingResolver) (usage.RecalculatePricingResult, error) {
+	s.calls++
+	return usage.RecalculatePricingResult{Status: "ok", Matched: 1, Recalculated: 1, WithPricing: 1}, nil
+}
+
 func TestAdminEndpoints_Enabled(t *testing.T) {
 	mock := &mockProvider{}
 	adminHandler := admin.NewHandler(nil, nil)
@@ -782,24 +793,47 @@ func TestAdminAPI_SkipsAuthWithoutMasterKey(t *testing.T) {
 	}
 }
 
-func TestAdminPricingRecalculationRequiresAuthWithoutMasterKey(t *testing.T) {
-	mock := &mockProvider{}
-	adminHandler := admin.NewHandler(nil, nil)
-	unsafeSrv := New(mock, &Config{
-		AdminEndpointsEnabled: true,
-		AdminHandler:          adminHandler,
-	})
-	unsafeReq := httptest.NewRequest(http.MethodPost, "/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{"confirmation":"recalculate"}`))
-	unsafeReq.Header.Set("Content-Type", "application/json")
-	unsafeRec := httptest.NewRecorder()
-	unsafeSrv.ServeHTTP(unsafeRec, unsafeReq)
-
-	if unsafeRec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected pricing recalculation 401 when no auth is configured, got %d body=%s", unsafeRec.Code, unsafeRec.Body.String())
+func TestAdminPricingRecalculationSkipsAuthWithoutMasterKey(t *testing.T) {
+	tests := []struct {
+		name          string
+		authenticator BearerTokenAuthenticator
+	}{
+		{name: "no auth configured"},
+		{name: "managed keys enabled", authenticator: mockAuthenticator{enabled: true, tokenToID: map[string]string{"managed-token": "key-123"}}},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockProvider{}
+			recalculator := &pricingRecalculatorStub{}
+			adminHandler := admin.NewHandler(nil, providers.NewModelRegistry(), admin.WithUsagePricingRecalculator(recalculator))
+			srv := New(mock, &Config{
+				Authenticator:         tt.authenticator,
+				AdminEndpointsEnabled: true,
+				AdminHandler:          adminHandler,
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{"confirmation":"recalculate"}`))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected pricing recalculation 200 without auth when master key is unset, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			if recalculator.calls != 1 {
+				t.Fatalf("recalculator calls = %d, want 1", recalculator.calls)
+			}
+		})
+	}
+}
+
+func TestAdminPricingRecalculationRequiresAuthWithMasterKey(t *testing.T) {
+	mock := &mockProvider{}
+	recalculator := &pricingRecalculatorStub{}
+	adminHandler := admin.NewHandler(nil, providers.NewModelRegistry(), admin.WithUsagePricingRecalculator(recalculator))
 	srv := New(mock, &Config{
-		Authenticator:         mockAuthenticator{enabled: true, tokenToID: map[string]string{"managed-token": "key-123"}},
+		MasterKey:             "test-secret-key",
 		AdminEndpointsEnabled: true,
 		AdminHandler:          adminHandler,
 	})
@@ -810,17 +844,23 @@ func TestAdminPricingRecalculationRequiresAuthWithoutMasterKey(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected pricing recalculation 401 without auth, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("expected pricing recalculation 401 without auth when master key is set, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if recalculator.calls != 0 {
+		t.Fatalf("recalculator calls after unauthorized request = %d, want 0", recalculator.calls)
 	}
 
 	authReq := httptest.NewRequest(http.MethodPost, "/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{"confirmation":"recalculate"}`))
 	authReq.Header.Set("Content-Type", "application/json")
-	authReq.Header.Set("Authorization", "Bearer managed-token")
+	authReq.Header.Set("Authorization", "Bearer test-secret-key")
 	authRec := httptest.NewRecorder()
 	srv.ServeHTTP(authRec, authReq)
 
-	if authRec.Code == http.StatusUnauthorized {
-		t.Fatalf("expected authorized pricing recalculation request to reach handler, got 401 body=%s", authRec.Body.String())
+	if authRec.Code != http.StatusOK {
+		t.Fatalf("expected authorized pricing recalculation 200, got %d body=%s", authRec.Code, authRec.Body.String())
+	}
+	if recalculator.calls != 1 {
+		t.Fatalf("recalculator calls after authorized request = %d, want 1", recalculator.calls)
 	}
 }
 

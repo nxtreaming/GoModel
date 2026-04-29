@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -190,6 +191,42 @@ func TestAdminDailyUsage_WithInterval_PostgreSQL(t *testing.T) {
 
 	// Should return valid JSON array (may be empty or have entries)
 	assert.True(t, json.Valid(body), "response should be valid JSON")
+
+	fixture.FlushAndClose(t)
+}
+
+func TestAdminPricingRecalculationNoMasterKey_PostgreSQL(t *testing.T) {
+	fixture := SetupTestServer(t, TestServerConfig{
+		DBType:                           "postgresql",
+		UsageEnabled:                     true,
+		UsagePricingRecalculationEnabled: true,
+		AdminEndpointsEnabled:            true,
+		OnlyModelInteractions:            false,
+	})
+
+	dbassert.ClearUsage(t, fixture.PgPool)
+
+	payload := newChatRequest("gpt-4", "Hello!")
+	resp := sendChatRequest(t, fixture.ServerURL, payload)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	closeBody(resp)
+
+	time.Sleep(2 * time.Second)
+
+	req, err := http.NewRequest(http.MethodPost, fixture.ServerURL+"/admin/api/v1/usage/recalculate-pricing", bytes.NewBufferString(`{"confirmation":"recalculate"}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer closeBody(resp)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var result usage.RecalculatePricingResult
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, "ok", result.Status)
+	assert.GreaterOrEqual(t, result.Matched, int64(1))
+	assert.GreaterOrEqual(t, result.Recalculated, int64(1))
 
 	fixture.FlushAndClose(t)
 }

@@ -3,18 +3,36 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"gomodel/internal/admin"
 	"gomodel/internal/providers"
 	"gomodel/internal/usage"
 )
+
+type e2ePricingRecalculator struct {
+	calls  int
+	params usage.RecalculatePricingParams
+	result usage.RecalculatePricingResult
+}
+
+func (r *e2ePricingRecalculator) RecalculatePricing(_ context.Context, params usage.RecalculatePricingParams, _ usage.PricingResolver) (usage.RecalculatePricingResult, error) {
+	r.calls++
+	r.params = params
+	if r.result.Status == "" {
+		r.result.Status = "ok"
+	}
+	return r.result, nil
+}
 
 func TestAdminAPI_EndpointsEnabled_E2E(t *testing.T) {
 	ts := setupAdminServer(t, "", true, false)
@@ -91,6 +109,35 @@ func TestAdminAPI_RequiresAuth_E2E(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 	})
+}
+
+func TestAdminAPI_PricingRecalculationNoMasterKey_E2E(t *testing.T) {
+	recalculator := &e2ePricingRecalculator{
+		result: usage.RecalculatePricingResult{Status: "ok", Matched: 1, Recalculated: 1, WithPricing: 1},
+	}
+	ts := setupE2EAdminServer(t, e2eServerOptions{
+		adminOptions: []admin.Option{admin.WithUsagePricingRecalculator(recalculator)},
+	})
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/api/v1/usage/recalculate-pricing", strings.NewReader(`{
+		"confirmation": "recalculate",
+		"user_path": "/team/recalc"
+	}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer closeBody(resp)
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, recalculator.calls)
+	assert.Equal(t, "/team/recalc", recalculator.params.UserPath)
+
+	var result usage.RecalculatePricingResult
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	assert.Equal(t, int64(1), result.Recalculated)
 }
 
 func TestAdminDashboard_Enabled_E2E(t *testing.T) {

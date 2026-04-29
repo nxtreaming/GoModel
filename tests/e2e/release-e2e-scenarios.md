@@ -35,6 +35,7 @@ Stateful note:
 - `S64`-`S79` mutate managed keys, workflows, and auth artifacts
 - `S80`-`S85` mutate response snapshots and response-cache artifacts
 - `S86`-`S89` mutate budget settings and budgets
+- `S90` mutates stored usage pricing fields on the no-master-key gateway
 - For stateful partial reruns, prefer a contiguous range that includes the
   prerequisite setup scenarios, or rerun with the same `--qa-suffix` and
   `--keep-artifacts`
@@ -1525,4 +1526,17 @@ run_release_budget_enforcement \
   "$QA_BUDGET_MONGO_PATH" \
   "s89-mongo-budget" \
   "QA_BUDGET_MONGO_OK_$QA_BUDGET_SUFFIX"
+```
+
+## 16. No-master-key admin mutations
+
+### S90 Usage pricing recalculation without master key
+
+Runs the pricing recalculation action on the main SQLite-backed gateway. The release stack starts this gateway with `GOMODEL_MASTER_KEY` unset, so the request intentionally sends no `Authorization` header.
+
+```bash
+curl -fsS -X POST "$BASE_URL/admin/api/v1/usage/recalculate-pricing" \
+  -H 'Content-Type: application/json' \
+  -d '{"confirmation":"recalculate"}' \
+  | jq -e '.status == "ok" and (.matched | type == "number") and (.recalculated | type == "number")'
 ```
