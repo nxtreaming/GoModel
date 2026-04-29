@@ -15,8 +15,8 @@ import (
 // maxEntriesPerBatch derives from maxSQLiteParams / columnsPerUsageEntry.
 const (
 	maxSQLiteParams      = 999
-	columnsPerUsageEntry = 18
-	maxEntriesPerBatch   = maxSQLiteParams / columnsPerUsageEntry // 55 entries
+	columnsPerUsageEntry = 19
+	maxEntriesPerBatch   = maxSQLiteParams / columnsPerUsageEntry // 52 entries
 )
 
 // SQLiteStore implements UsageStore for SQLite databases.
@@ -64,6 +64,7 @@ func NewSQLiteStore(db *sql.DB, retentionDays int) (*SQLiteStore, error) {
 		"ALTER TABLE usage ADD COLUMN input_cost REAL",
 		"ALTER TABLE usage ADD COLUMN output_cost REAL",
 		"ALTER TABLE usage ADD COLUMN total_cost REAL",
+		"ALTER TABLE usage ADD COLUMN cost_source TEXT DEFAULT ''",
 		"ALTER TABLE usage ADD COLUMN costs_calculation_caveat TEXT DEFAULT ''",
 		"ALTER TABLE usage ADD COLUMN provider_name TEXT",
 		"ALTER TABLE usage ADD COLUMN user_path TEXT",
@@ -130,7 +131,7 @@ func (s *SQLiteStore) WriteBatch(ctx context.Context, entries []*UsageEntry) err
 
 		for j, e := range chunk {
 			e = normalizedUsageEntryForStorage(e)
-			placeholders[j] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+			placeholders[j] = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 
 			rawDataJSON := marshalRawData(e.RawData, e.ID)
 
@@ -158,13 +159,14 @@ func (s *SQLiteStore) WriteBatch(ctx context.Context, entries []*UsageEntry) err
 				e.InputCost,
 				e.OutputCost,
 				e.TotalCost,
+				e.CostSource,
 				e.CostsCalculationCaveat,
 			)
 		}
 
 		query := `INSERT OR IGNORE INTO usage (id, request_id, provider_id, timestamp, model, provider, provider_name,
 			endpoint, user_path, cache_type, input_tokens, output_tokens, total_tokens, raw_data,
-			input_cost, output_cost, total_cost, costs_calculation_caveat) VALUES ` +
+			input_cost, output_cost, total_cost, cost_source, costs_calculation_caveat) VALUES ` +
 			strings.Join(placeholders, ",")
 
 		_, err := s.db.ExecContext(ctx, query, values...)

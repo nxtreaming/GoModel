@@ -60,6 +60,7 @@ type UsageEntry struct {
 	InputCost  *float64 `json:"input_cost,omitempty" bson:"input_cost,omitempty"`
 	OutputCost *float64 `json:"output_cost,omitempty" bson:"output_cost,omitempty"`
 	TotalCost  *float64 `json:"total_cost,omitempty" bson:"total_cost,omitempty"`
+	CostSource string   `json:"cost_source,omitempty" bson:"cost_source,omitempty"`
 
 	// CostsCalculationCaveat describes any incomplete aspects of cost calculation.
 	// Empty means all token types were fully mapped to pricing data.

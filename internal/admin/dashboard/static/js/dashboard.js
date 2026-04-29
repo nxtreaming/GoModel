@@ -933,6 +933,13 @@ function dashboard() {
 
     formatCostTooltip(entry) {
       const lines = [];
+      if (
+        typeof this.costSourceTooltip === "function" &&
+        this.costSourceTooltip(entry)
+      ) {
+        lines.push(this.costSourceTooltip(entry));
+        lines.push("");
+      }
       lines.push("Input: " + this.formatCost(entry.input_cost));
       lines.push("Output: " + this.formatCost(entry.output_cost));
       if (entry.raw_data) {
@@ -941,7 +948,11 @@ function dashboard() {
           const label = key
             .replace(/_/g, " ")
             .replace(/\b\w/g, (c) => c.toUpperCase());
-          lines.push(label + ": " + this.formatNumber(value));
+          const formatted =
+            value && typeof value === "object"
+              ? JSON.stringify(value)
+              : this.formatNumber(value);
+          lines.push(label + ": " + formatted);
         }
       }
       return lines.join("\n");

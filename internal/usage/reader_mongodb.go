@@ -16,6 +16,52 @@ type MongoDBReader struct {
 	collection *mongo.Collection
 }
 
+type mongoUsageLogRow struct {
+	ID                     string         `bson:"_id"`
+	RequestID              string         `bson:"request_id"`
+	ProviderID             string         `bson:"provider_id"`
+	Timestamp              time.Time      `bson:"timestamp"`
+	Model                  string         `bson:"model"`
+	Provider               string         `bson:"provider"`
+	ProviderName           string         `bson:"provider_name"`
+	Endpoint               string         `bson:"endpoint"`
+	UserPath               string         `bson:"user_path"`
+	CacheType              string         `bson:"cache_type"`
+	InputTokens            int            `bson:"input_tokens"`
+	OutputTokens           int            `bson:"output_tokens"`
+	TotalTokens            int            `bson:"total_tokens"`
+	InputCost              *float64       `bson:"input_cost"`
+	OutputCost             *float64       `bson:"output_cost"`
+	TotalCost              *float64       `bson:"total_cost"`
+	CostSource             string         `bson:"cost_source"`
+	RawData                map[string]any `bson:"raw_data"`
+	CostsCalculationCaveat string         `bson:"costs_calculation_caveat"`
+}
+
+func (row mongoUsageLogRow) toUsageLogEntry() UsageLogEntry {
+	return UsageLogEntry{
+		ID:                     row.ID,
+		RequestID:              row.RequestID,
+		ProviderID:             row.ProviderID,
+		Timestamp:              row.Timestamp,
+		Model:                  row.Model,
+		Provider:               row.Provider,
+		ProviderName:           displayUsageProviderName(row.ProviderName, row.Provider),
+		Endpoint:               row.Endpoint,
+		UserPath:               row.UserPath,
+		CacheType:              normalizeCacheType(row.CacheType),
+		InputTokens:            row.InputTokens,
+		OutputTokens:           row.OutputTokens,
+		TotalTokens:            row.TotalTokens,
+		InputCost:              row.InputCost,
+		OutputCost:             row.OutputCost,
+		TotalCost:              row.TotalCost,
+		CostSource:             row.CostSource,
+		RawData:                row.RawData,
+		CostsCalculationCaveat: row.CostsCalculationCaveat,
+	}
+}
+
 // NewMongoDBReader creates a new MongoDB usage reader.
 func NewMongoDBReader(database *mongo.Database) (*MongoDBReader, error) {
 	if database == nil {
@@ -44,7 +90,9 @@ func (r *MongoDBReader) GetSummary(ctx context.Context, params UsageQueryParams)
 		{Key: "total_input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$input_cost", 0}}}}}},
 		{Key: "total_output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$output_cost", 0}}}}}},
 		{Key: "total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$total_cost", 0}}}}}},
-		{Key: "has_costs", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$input_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$output_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
 	}}})
 
 	cursor, err := r.collection.Aggregate(ctx, pipeline)
@@ -63,7 +111,9 @@ func (r *MongoDBReader) GetSummary(ctx context.Context, params UsageQueryParams)
 			TotalInputCost  float64 `bson:"total_input_cost"`
 			TotalOutputCost float64 `bson:"total_output_cost"`
 			TotalCost       float64 `bson:"total_cost"`
-			HasCosts        int     `bson:"has_costs"`
+			HasInputCost    int     `bson:"has_input_cost"`
+			HasOutputCost   int     `bson:"has_output_cost"`
+			HasTotalCost    int     `bson:"has_total_cost"`
 		}
 		if err := cursor.Decode(&result); err != nil {
 			return nil, fmt.Errorf("failed to decode usage summary: %w", err)
@@ -72,9 +122,13 @@ func (r *MongoDBReader) GetSummary(ctx context.Context, params UsageQueryParams)
 		summary.TotalInput = result.TotalInput
 		summary.TotalOutput = result.TotalOutput
 		summary.TotalTokens = result.TotalTokens
-		if result.HasCosts > 0 {
+		if result.HasInputCost > 0 {
 			summary.TotalInputCost = &result.TotalInputCost
+		}
+		if result.HasOutputCost > 0 {
 			summary.TotalOutputCost = &result.TotalOutputCost
+		}
+		if result.HasTotalCost > 0 {
 			summary.TotalCost = &result.TotalCost
 		}
 	}
@@ -109,7 +163,9 @@ func (r *MongoDBReader) GetUsageByModel(ctx context.Context, params UsageQueryPa
 		{Key: "input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$input_cost", 0}}}}}},
 		{Key: "output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$output_cost", 0}}}}}},
 		{Key: "total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$total_cost", 0}}}}}},
-		{Key: "has_costs", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$input_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$output_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
 	}}})
 
 	cursor, err := r.collection.Aggregate(ctx, pipeline)
@@ -126,12 +182,14 @@ func (r *MongoDBReader) GetUsageByModel(ctx context.Context, params UsageQueryPa
 				Provider     string `bson:"provider"`
 				ProviderName string `bson:"provider_name"`
 			} `bson:"_id"`
-			InputTokens  int64   `bson:"input_tokens"`
-			OutputTokens int64   `bson:"output_tokens"`
-			InputCost    float64 `bson:"input_cost"`
-			OutputCost   float64 `bson:"output_cost"`
-			TotalCost    float64 `bson:"total_cost"`
-			HasCosts     int     `bson:"has_costs"`
+			InputTokens   int64   `bson:"input_tokens"`
+			OutputTokens  int64   `bson:"output_tokens"`
+			InputCost     float64 `bson:"input_cost"`
+			OutputCost    float64 `bson:"output_cost"`
+			TotalCost     float64 `bson:"total_cost"`
+			HasInputCost  int     `bson:"has_input_cost"`
+			HasOutputCost int     `bson:"has_output_cost"`
+			HasTotalCost  int     `bson:"has_total_cost"`
 		}
 		if err := cursor.Decode(&row); err != nil {
 			return nil, fmt.Errorf("failed to decode usage by model row: %w", err)
@@ -143,9 +201,13 @@ func (r *MongoDBReader) GetUsageByModel(ctx context.Context, params UsageQueryPa
 			InputTokens:  row.InputTokens,
 			OutputTokens: row.OutputTokens,
 		}
-		if row.HasCosts > 0 {
+		if row.HasInputCost > 0 {
 			m.InputCost = &row.InputCost
+		}
+		if row.HasOutputCost > 0 {
 			m.OutputCost = &row.OutputCost
+		}
+		if row.HasTotalCost > 0 {
 			m.TotalCost = &row.TotalCost
 		}
 		result = append(result, m)
@@ -194,7 +256,9 @@ func (r *MongoDBReader) GetUsageByUserPath(ctx context.Context, params UsageQuer
 		{Key: "input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$input_cost", 0}}}}}},
 		{Key: "output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$output_cost", 0}}}}}},
 		{Key: "total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$total_cost", 0}}}}}},
-		{Key: "has_costs", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$input_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$output_cost", nil}}}, 1, 0}}}}}},
+		{Key: "has_total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
 	}}})
 
 	cursor, err := r.collection.Aggregate(ctx, pipeline)
@@ -206,14 +270,16 @@ func (r *MongoDBReader) GetUsageByUserPath(ctx context.Context, params UsageQuer
 	result := make([]UserPathUsage, 0)
 	for cursor.Next(ctx) {
 		var row struct {
-			UserPath     string  `bson:"_id"`
-			InputTokens  int64   `bson:"input_tokens"`
-			OutputTokens int64   `bson:"output_tokens"`
-			TotalTokens  int64   `bson:"total_tokens"`
-			InputCost    float64 `bson:"input_cost"`
-			OutputCost   float64 `bson:"output_cost"`
-			TotalCost    float64 `bson:"total_cost"`
-			HasCosts     int     `bson:"has_costs"`
+			UserPath      string  `bson:"_id"`
+			InputTokens   int64   `bson:"input_tokens"`
+			OutputTokens  int64   `bson:"output_tokens"`
+			TotalTokens   int64   `bson:"total_tokens"`
+			InputCost     float64 `bson:"input_cost"`
+			OutputCost    float64 `bson:"output_cost"`
+			TotalCost     float64 `bson:"total_cost"`
+			HasInputCost  int     `bson:"has_input_cost"`
+			HasOutputCost int     `bson:"has_output_cost"`
+			HasTotalCost  int     `bson:"has_total_cost"`
 		}
 		if err := cursor.Decode(&row); err != nil {
 			return nil, fmt.Errorf("failed to decode usage by user path row: %w", err)
@@ -227,9 +293,13 @@ func (r *MongoDBReader) GetUsageByUserPath(ctx context.Context, params UsageQuer
 		if u.UserPath == "" {
 			u.UserPath = "/"
 		}
-		if row.HasCosts > 0 {
+		if row.HasInputCost > 0 {
 			u.InputCost = &row.InputCost
+		}
+		if row.HasOutputCost > 0 {
 			u.OutputCost = &row.OutputCost
+		}
+		if row.HasTotalCost > 0 {
 			u.TotalCost = &row.TotalCost
 		}
 		result = append(result, u)
@@ -296,26 +366,7 @@ func (r *MongoDBReader) GetUsageLog(ctx context.Context, params UsageLogParams) 
 	defer cursor.Close(ctx)
 
 	var facetResult struct {
-		Data []struct {
-			ID                     string         `bson:"_id"`
-			RequestID              string         `bson:"request_id"`
-			ProviderID             string         `bson:"provider_id"`
-			Timestamp              time.Time      `bson:"timestamp"`
-			Model                  string         `bson:"model"`
-			Provider               string         `bson:"provider"`
-			ProviderName           string         `bson:"provider_name"`
-			Endpoint               string         `bson:"endpoint"`
-			UserPath               string         `bson:"user_path"`
-			CacheType              string         `bson:"cache_type"`
-			InputTokens            int            `bson:"input_tokens"`
-			OutputTokens           int            `bson:"output_tokens"`
-			TotalTokens            int            `bson:"total_tokens"`
-			InputCost              *float64       `bson:"input_cost"`
-			OutputCost             *float64       `bson:"output_cost"`
-			TotalCost              *float64       `bson:"total_cost"`
-			RawData                map[string]any `bson:"raw_data"`
-			CostsCalculationCaveat string         `bson:"costs_calculation_caveat"`
-		} `bson:"data"`
+		Data  []mongoUsageLogRow `bson:"data"`
 		Total []struct {
 			Count int `bson:"count"`
 		} `bson:"total"`
@@ -338,26 +389,7 @@ func (r *MongoDBReader) GetUsageLog(ctx context.Context, params UsageLogParams) 
 
 	entries := make([]UsageLogEntry, 0, len(facetResult.Data))
 	for _, row := range facetResult.Data {
-		entries = append(entries, UsageLogEntry{
-			ID:                     row.ID,
-			RequestID:              row.RequestID,
-			ProviderID:             row.ProviderID,
-			Timestamp:              row.Timestamp,
-			Model:                  row.Model,
-			Provider:               row.Provider,
-			ProviderName:           displayUsageProviderName(row.ProviderName, row.Provider),
-			Endpoint:               row.Endpoint,
-			UserPath:               row.UserPath,
-			CacheType:              normalizeCacheType(row.CacheType),
-			InputTokens:            row.InputTokens,
-			OutputTokens:           row.OutputTokens,
-			TotalTokens:            row.TotalTokens,
-			InputCost:              row.InputCost,
-			OutputCost:             row.OutputCost,
-			TotalCost:              row.TotalCost,
-			RawData:                row.RawData,
-			CostsCalculationCaveat: row.CostsCalculationCaveat,
-		})
+		entries = append(entries, row.toUsageLogEntry())
 	}
 
 	return &UsageLogResult{
@@ -384,52 +416,14 @@ func (r *MongoDBReader) GetUsageByRequestIDs(ctx context.Context, requestIDs []s
 	}
 	defer cursor.Close(ctx)
 
-	var rows []struct {
-		ID                     string         `bson:"_id"`
-		RequestID              string         `bson:"request_id"`
-		ProviderID             string         `bson:"provider_id"`
-		Timestamp              time.Time      `bson:"timestamp"`
-		Model                  string         `bson:"model"`
-		Provider               string         `bson:"provider"`
-		ProviderName           string         `bson:"provider_name"`
-		Endpoint               string         `bson:"endpoint"`
-		UserPath               string         `bson:"user_path"`
-		CacheType              string         `bson:"cache_type"`
-		InputTokens            int            `bson:"input_tokens"`
-		OutputTokens           int            `bson:"output_tokens"`
-		TotalTokens            int            `bson:"total_tokens"`
-		InputCost              *float64       `bson:"input_cost"`
-		OutputCost             *float64       `bson:"output_cost"`
-		TotalCost              *float64       `bson:"total_cost"`
-		RawData                map[string]any `bson:"raw_data"`
-		CostsCalculationCaveat string         `bson:"costs_calculation_caveat"`
-	}
+	var rows []mongoUsageLogRow
 	if err := cursor.All(ctx, &rows); err != nil {
 		return nil, fmt.Errorf("failed to decode usage by request ID rows: %w", err)
 	}
 
 	grouped := make(map[string][]UsageLogEntry, len(requestIDs))
 	for _, row := range rows {
-		entry := UsageLogEntry{
-			ID:                     row.ID,
-			RequestID:              row.RequestID,
-			ProviderID:             row.ProviderID,
-			Timestamp:              row.Timestamp,
-			Model:                  row.Model,
-			Provider:               row.Provider,
-			ProviderName:           displayUsageProviderName(row.ProviderName, row.Provider),
-			Endpoint:               row.Endpoint,
-			UserPath:               row.UserPath,
-			CacheType:              normalizeCacheType(row.CacheType),
-			InputTokens:            row.InputTokens,
-			OutputTokens:           row.OutputTokens,
-			TotalTokens:            row.TotalTokens,
-			InputCost:              row.InputCost,
-			OutputCost:             row.OutputCost,
-			TotalCost:              row.TotalCost,
-			RawData:                row.RawData,
-			CostsCalculationCaveat: row.CostsCalculationCaveat,
-		}
+		entry := row.toUsageLogEntry()
 		grouped[entry.RequestID] = append(grouped[entry.RequestID], entry)
 	}
 
@@ -499,7 +493,9 @@ func (r *MongoDBReader) GetDailyUsage(ctx context.Context, params UsageQueryPara
 			{Key: "input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$input_cost", 0}}}}}},
 			{Key: "output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$output_cost", 0}}}}}},
 			{Key: "total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$ifNull", Value: bson.A{"$total_cost", 0}}}}}},
-			{Key: "has_costs", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
+			{Key: "has_input_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$input_cost", nil}}}, 1, 0}}}}}},
+			{Key: "has_output_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$output_cost", nil}}}, 1, 0}}}}}},
+			{Key: "has_total_cost", Value: bson.D{{Key: "$sum", Value: bson.D{{Key: "$cond", Value: bson.A{bson.D{{Key: "$gt", Value: bson.A{"$total_cost", nil}}}, 1, 0}}}}}},
 		}}},
 		bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
 	)
@@ -513,15 +509,17 @@ func (r *MongoDBReader) GetDailyUsage(ctx context.Context, params UsageQueryPara
 	result := make([]DailyUsage, 0)
 	for cursor.Next(ctx) {
 		var row struct {
-			Date         string  `bson:"_id"`
-			Requests     int     `bson:"requests"`
-			InputTokens  int64   `bson:"input_tokens"`
-			OutputTokens int64   `bson:"output_tokens"`
-			TotalTokens  int64   `bson:"total_tokens"`
-			InputCost    float64 `bson:"input_cost"`
-			OutputCost   float64 `bson:"output_cost"`
-			TotalCost    float64 `bson:"total_cost"`
-			HasCosts     int     `bson:"has_costs"`
+			Date          string  `bson:"_id"`
+			Requests      int     `bson:"requests"`
+			InputTokens   int64   `bson:"input_tokens"`
+			OutputTokens  int64   `bson:"output_tokens"`
+			TotalTokens   int64   `bson:"total_tokens"`
+			InputCost     float64 `bson:"input_cost"`
+			OutputCost    float64 `bson:"output_cost"`
+			TotalCost     float64 `bson:"total_cost"`
+			HasInputCost  int     `bson:"has_input_cost"`
+			HasOutputCost int     `bson:"has_output_cost"`
+			HasTotalCost  int     `bson:"has_total_cost"`
 		}
 		if err := cursor.Decode(&row); err != nil {
 			return nil, fmt.Errorf("failed to decode daily usage row: %w", err)
@@ -533,9 +531,13 @@ func (r *MongoDBReader) GetDailyUsage(ctx context.Context, params UsageQueryPara
 			OutputTokens: row.OutputTokens,
 			TotalTokens:  row.TotalTokens,
 		}
-		if row.HasCosts > 0 {
+		if row.HasInputCost > 0 {
 			d.InputCost = &row.InputCost
+		}
+		if row.HasOutputCost > 0 {
 			d.OutputCost = &row.OutputCost
+		}
+		if row.HasTotalCost > 0 {
 			d.TotalCost = &row.TotalCost
 		}
 		result = append(result, d)

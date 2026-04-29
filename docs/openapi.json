@@ -275,165 +275,6 @@
         ]
       }
     },
-    "/admin/api/v1/budgets/{user_path}/{period}": {
-      "put": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Create or update one budget",
-        "parameters": [
-          {
-            "description": "URL-encoded budget user path",
-            "name": "user_path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Budget period name or seconds",
-            "name": "period",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/admin.upsertBudgetRequest"
-              }
-            }
-          },
-          "description": "Budget amount",
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/admin.budgetListResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/core.GatewayError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/core.GatewayError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/core.GatewayError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      },
-      "delete": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Delete one budget",
-        "parameters": [
-          {
-            "description": "URL-encoded budget user path",
-            "name": "user_path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Budget period name or seconds",
-            "name": "period",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/admin.budgetListResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad Request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/core.GatewayError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/core.GatewayError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service Unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/core.GatewayError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
     "/admin/api/v1/budgets/reset": {
       "post": {
         "tags": [
@@ -633,6 +474,165 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/budget.Settings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/admin/api/v1/budgets/{user_path}/{period}": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Create or update one budget",
+        "parameters": [
+          {
+            "description": "URL-encoded budget user path",
+            "name": "user_path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Budget period name or seconds",
+            "name": "period",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/admin.upsertBudgetRequest"
+              }
+            }
+          },
+          "description": "Budget amount",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/admin.budgetListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Delete one budget",
+        "parameters": [
+          {
+            "description": "URL-encoded budget user path",
+            "name": "user_path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Budget period name or seconds",
+            "name": "period",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/admin.budgetListResponse"
                 }
               }
             }
@@ -1117,6 +1117,82 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/admin/api/v1/usage/recalculate-pricing": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Recalculate stored usage costs from current model pricing metadata",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/admin.recalculatePricingRequest"
+              }
+            }
+          },
+          "description": "Recalculation filters and confirmation",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/usage.RecalculatePricingResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/core.GatewayError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -4596,19 +4672,34 @@
           }
         }
       },
-      "admin.deleteBudgetRequest": {
+      "admin.recalculatePricingRequest": {
         "type": "object",
         "properties": {
-          "period": {
+          "confirm": {
             "type": "string"
           },
-          "period_seconds": {
+          "confirmation": {
+            "type": "string"
+          },
+          "days": {
             "type": "integer"
+          },
+          "end_date": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "start_date": {
+            "type": "string"
           },
           "user_path": {
             "type": "string"
           }
-        }
+        },
+        "required": [
+          "confirmation"
+        ]
       },
       "admin.resetBudgetRequest": {
         "type": "object",
@@ -4674,9 +4765,6 @@
       },
       "admin.upsertBudgetRequest": {
         "type": "object",
-        "required": [
-          "amount"
-        ],
         "properties": {
           "amount": {
             "type": "number"
@@ -6322,6 +6410,26 @@
           }
         }
       },
+      "usage.RecalculatePricingResult": {
+        "type": "object",
+        "properties": {
+          "matched": {
+            "type": "integer"
+          },
+          "recalculated": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "with_pricing": {
+            "type": "integer"
+          },
+          "without_pricing": {
+            "type": "integer"
+          }
+        }
+      },
       "usage.RequestUsageSummary": {
         "type": "object",
         "properties": {
@@ -6358,6 +6466,9 @@
         "type": "object",
         "properties": {
           "cache_type": {
+            "type": "string"
+          },
+          "cost_source": {
             "type": "string"
           },
           "costs_calculation_caveat": {

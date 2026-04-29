@@ -151,7 +151,7 @@ func (r *SQLiteReader) GetUsageLog(ctx context.Context, params UsageLogParams) (
 
 	// Fetch page
 	dataQuery := `SELECT id, request_id, provider_id, timestamp, model, provider, provider_name, endpoint, user_path, cache_type,
-		input_tokens, output_tokens, total_tokens, COALESCE(input_cost, 0), COALESCE(output_cost, 0), COALESCE(total_cost, 0), raw_data, COALESCE(costs_calculation_caveat, '')
+		input_tokens, output_tokens, total_tokens, input_cost, output_cost, total_cost, COALESCE(cost_source, ''), raw_data, COALESCE(costs_calculation_caveat, '')
 		FROM usage` + where + ` ORDER BY ` + sqliteTimestampEpochExpr() + ` DESC, id DESC LIMIT ? OFFSET ?`
 	dataArgs := append(append([]any(nil), args...), limit, offset)
 
@@ -192,7 +192,7 @@ func (r *SQLiteReader) GetUsageByRequestIDs(ctx context.Context, requestIDs []st
 	}
 
 	query := `SELECT id, request_id, provider_id, timestamp, model, provider, provider_name, endpoint, user_path, cache_type,
-		input_tokens, output_tokens, total_tokens, COALESCE(input_cost, 0), COALESCE(output_cost, 0), COALESCE(total_cost, 0), raw_data, COALESCE(costs_calculation_caveat, '')
+		input_tokens, output_tokens, total_tokens, input_cost, output_cost, total_cost, COALESCE(cost_source, ''), raw_data, COALESCE(costs_calculation_caveat, '')
 		FROM usage WHERE request_id IN (` + placeholders + `) ORDER BY ` + sqliteTimestampEpochExpr() + ` DESC, id DESC`
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -227,7 +227,7 @@ func scanSQLiteUsageLogEntries(rows *sql.Rows) ([]UsageLogEntry, error) {
 		var userPath sql.NullString
 		var cacheType sql.NullString
 		if err := rows.Scan(&e.ID, &e.RequestID, &e.ProviderID, &ts, &e.Model, &e.Provider, &providerName, &e.Endpoint, &userPath, &cacheType,
-			&e.InputTokens, &e.OutputTokens, &e.TotalTokens, &e.InputCost, &e.OutputCost, &e.TotalCost, &rawDataJSON, &caveat); err != nil {
+			&e.InputTokens, &e.OutputTokens, &e.TotalTokens, &e.InputCost, &e.OutputCost, &e.TotalCost, &e.CostSource, &rawDataJSON, &caveat); err != nil {
 			return nil, fmt.Errorf("failed to scan usage log row: %w", err)
 		}
 		if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {

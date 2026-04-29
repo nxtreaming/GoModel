@@ -161,6 +161,21 @@ func copyExtendedUsageFields(rawData map[string]any, usageMap map[string]any) {
 		case "prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens",
 			"prompt_tokens_details", "completion_tokens_details", "input_tokens_details", "output_tokens_details":
 			continue
+		case "cost":
+			if numericValue, ok := numericFloat(value); ok && numericValue >= 0 {
+				rawData[key] = numericValue
+			}
+			continue
+		case "cost_details":
+			if details, ok := nestedUsageMap(value); ok {
+				rawData[key] = details
+			}
+			continue
+		case "is_byok":
+			if boolValue, ok := value.(bool); ok {
+				rawData[key] = boolValue
+			}
+			continue
 		}
 		if numericValue, ok := numericUsageValue(value); ok && numericValue > 0 {
 			rawData[key] = numericValue

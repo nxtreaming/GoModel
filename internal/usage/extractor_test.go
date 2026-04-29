@@ -386,6 +386,9 @@ func TestExtractFromChatResponse_WithPricing(t *testing.T) {
 	if *entry.TotalCost != wantTotal {
 		t.Errorf("TotalCost = %f, want %f", *entry.TotalCost, wantTotal)
 	}
+	if entry.CostSource != CostSourceModelPricing {
+		t.Errorf("CostSource = %q, want %q", entry.CostSource, CostSourceModelPricing)
+	}
 }
 
 func TestExtractFromResponsesResponse_WithPricing(t *testing.T) {
@@ -429,6 +432,38 @@ func TestExtractFromResponsesResponse_WithPricing(t *testing.T) {
 	wantTotal := wantInput + wantOutput
 	if *entry.TotalCost != wantTotal {
 		t.Errorf("TotalCost = %f, want %f", *entry.TotalCost, wantTotal)
+	}
+	if entry.CostSource != CostSourceModelPricing {
+		t.Errorf("CostSource = %q, want %q", entry.CostSource, CostSourceModelPricing)
+	}
+}
+
+func TestExtractFromChatResponse_OpenRouterCreditCostWithoutStaticPricing(t *testing.T) {
+	resp := &core.ChatResponse{
+		ID:    "gen-openrouter",
+		Model: "openai/gpt-4o",
+		Usage: core.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 4,
+			TotalTokens:      14,
+			RawUsage: map[string]any{
+				"cost": 0.00014,
+			},
+		},
+	}
+
+	entry := ExtractFromChatResponse(resp, "req-openrouter", "openrouter", "/v1/chat/completions")
+	if entry == nil {
+		t.Fatal("expected non-nil entry")
+	}
+	if entry.InputCost != nil || entry.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %v/%v, want nil without credited split", entry.InputCost, entry.OutputCost)
+	}
+	if entry.TotalCost == nil || *entry.TotalCost != 0.00014 {
+		t.Fatalf("TotalCost = %v, want 0.00014", entry.TotalCost)
+	}
+	if entry.CostSource != CostSourceOpenRouterCredits {
+		t.Fatalf("CostSource = %q, want %q", entry.CostSource, CostSourceOpenRouterCredits)
 	}
 }
 

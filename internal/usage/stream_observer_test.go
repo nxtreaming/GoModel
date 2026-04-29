@@ -127,6 +127,47 @@ func TestStreamUsageObserverWithExtendedUsage(t *testing.T) {
 	}
 }
 
+func TestStreamUsageObserverOpenRouterCreditCost(t *testing.T) {
+	logger := &trackingLogger{enabled: true}
+	observer := NewStreamUsageObserver(logger, "openai/gpt-4o", "openrouter", "req-openrouter", "/v1/chat/completions", nil)
+	observer.OnJSONEvent(map[string]any{
+		"id":    "gen-openrouter",
+		"model": "openai/gpt-4o",
+		"usage": map[string]any{
+			"prompt_tokens":     float64(10),
+			"completion_tokens": float64(4),
+			"total_tokens":      float64(14),
+			"cost":              float64(0.00014),
+			"cost_details": map[string]any{
+				"upstream_inference_prompt_cost":      float64(0.00010),
+				"upstream_inference_completions_cost": float64(0.00004),
+			},
+		},
+	})
+	observer.OnStreamClose()
+
+	entries := logger.getEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.RawData == nil || entry.RawData["cost"] != 0.00014 {
+		t.Fatalf("RawData[cost] = %#v, want 0.00014", entry.RawData["cost"])
+	}
+	if entry.TotalCost == nil || *entry.TotalCost != 0.00014 {
+		t.Fatalf("TotalCost = %v, want 0.00014", entry.TotalCost)
+	}
+	if entry.InputCost == nil || *entry.InputCost != 0.00010 {
+		t.Fatalf("InputCost = %v, want 0.00010", entry.InputCost)
+	}
+	if entry.OutputCost == nil || *entry.OutputCost != 0.00004 {
+		t.Fatalf("OutputCost = %v, want 0.00004", entry.OutputCost)
+	}
+	if entry.CostSource != CostSourceOpenRouterCredits {
+		t.Fatalf("CostSource = %q, want %q", entry.CostSource, CostSourceOpenRouterCredits)
+	}
+}
+
 func TestStreamUsageObserverNoUsage(t *testing.T) {
 	streamData := `data: {"id":"chatcmpl-789","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}
 

@@ -373,6 +373,130 @@ func TestCalculateGranularCost_OpenRouter_PromptCachedTokensAndReasoningBreakdow
 	}
 }
 
+func TestCalculateUsageCost_OpenRouterCreditsOverrideStaticPricing(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(100.0),
+		OutputPerMtok: new(100.0),
+	}
+	rawData := map[string]any{
+		"cost": 0.00014,
+		"cost_details": map[string]any{
+			"upstream_inference_prompt_cost":      0.00010,
+			"upstream_inference_completions_cost": 0.00004,
+		},
+	}
+
+	result := CalculateUsageCost(10, 4, rawData, "openrouter", pricing)
+
+	assertCostNear(t, "InputCost", result.InputCost, 0.00010)
+	assertCostNear(t, "OutputCost", result.OutputCost, 0.00004)
+	assertCostNear(t, "TotalCost", result.TotalCost, 0.00014)
+	if result.Source != CostSourceOpenRouterCredits {
+		t.Fatalf("Source = %q, want %q", result.Source, CostSourceOpenRouterCredits)
+	}
+}
+
+func TestCalculateUsageCost_OpenRouterCreditsWithoutMatchingSplitUsesTotalOnly(t *testing.T) {
+	rawData := map[string]any{
+		"cost": 0.00014,
+		"cost_details": map[string]any{
+			"upstream_inference_prompt_cost":      0.010,
+			"upstream_inference_completions_cost": 0.020,
+		},
+	}
+
+	result := CalculateUsageCost(10, 4, rawData, "openrouter", nil)
+
+	if result.InputCost != nil || result.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %v/%v, want nil split when details do not match credited total", result.InputCost, result.OutputCost)
+	}
+	assertCostNear(t, "TotalCost", result.TotalCost, 0.00014)
+	if result.Source != CostSourceOpenRouterCredits {
+		t.Fatalf("Source = %q, want %q", result.Source, CostSourceOpenRouterCredits)
+	}
+}
+
+func TestCalculateUsageCost_OpenRouterRejectsNonFiniteCreditCost(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(1.0),
+		OutputPerMtok: new(2.0),
+	}
+	tests := []struct {
+		name string
+		cost float64
+	}{
+		{name: "nan", cost: math.NaN()},
+		{name: "positive infinity", cost: math.Inf(1)},
+		{name: "negative infinity", cost: math.Inf(-1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rawData := map[string]any{"cost": test.cost}
+
+			result := CalculateUsageCost(1_000_000, 500_000, rawData, "openrouter", pricing)
+
+			assertCostNear(t, "InputCost", result.InputCost, 1.0)
+			assertCostNear(t, "OutputCost", result.OutputCost, 1.0)
+			assertCostNear(t, "TotalCost", result.TotalCost, 2.0)
+			if result.Source != CostSourceModelPricing {
+				t.Fatalf("Source = %q, want %q", result.Source, CostSourceModelPricing)
+			}
+		})
+	}
+}
+
+func TestCalculateUsageCost_OpenRouterRejectsNonFiniteCreditCostSplit(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputCost  float64
+		outputCost float64
+	}{
+		{name: "nan input", inputCost: math.NaN(), outputCost: 0.00004},
+		{name: "infinite input", inputCost: math.Inf(1), outputCost: 0.00004},
+		{name: "nan output", inputCost: 0.00010, outputCost: math.NaN()},
+		{name: "infinite output", inputCost: 0.00010, outputCost: math.Inf(1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rawData := map[string]any{
+				"cost": 0.00014,
+				"cost_details": map[string]any{
+					"upstream_inference_prompt_cost":      test.inputCost,
+					"upstream_inference_completions_cost": test.outputCost,
+				},
+			}
+
+			result := CalculateUsageCost(10, 4, rawData, "openrouter", nil)
+
+			if result.InputCost != nil || result.OutputCost != nil {
+				t.Fatalf("InputCost/OutputCost = %v/%v, want nil split for non-finite details", result.InputCost, result.OutputCost)
+			}
+			assertCostNear(t, "TotalCost", result.TotalCost, 0.00014)
+			if result.Source != CostSourceOpenRouterCredits {
+				t.Fatalf("Source = %q, want %q", result.Source, CostSourceOpenRouterCredits)
+			}
+		})
+	}
+}
+
+func TestCalculateUsageCost_OpenRouterFallsBackToModelPricingWithoutCredits(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(1.0),
+		OutputPerMtok: new(2.0),
+	}
+
+	result := CalculateUsageCost(1_000_000, 500_000, nil, "openrouter", pricing)
+
+	assertCostNear(t, "InputCost", result.InputCost, 1.0)
+	assertCostNear(t, "OutputCost", result.OutputCost, 1.0)
+	assertCostNear(t, "TotalCost", result.TotalCost, 2.0)
+	if result.Source != CostSourceModelPricing {
+		t.Fatalf("Source = %q, want %q", result.Source, CostSourceModelPricing)
+	}
+}
+
 func TestCalculateGranularCost_InformationalFieldsNoCaveat(t *testing.T) {
 	pricing := &core.ModelPricing{
 		InputPerMtok:  new(2.50),

@@ -35,12 +35,13 @@ func (s *PostgreSQLStore) RecalculatePricing(ctx context.Context, params Recalcu
 		update := recalculateEntryCosts(entry, resolver)
 		if _, err := tx.Exec(ctx, `
 			UPDATE usage
-			SET input_cost = $1, output_cost = $2, total_cost = $3, costs_calculation_caveat = $4
-			WHERE id = $5::uuid
+			SET input_cost = $1, output_cost = $2, total_cost = $3, cost_source = $4, costs_calculation_caveat = $5
+			WHERE id = $6::uuid
 		`,
 			nullableFloat(update.InputCost),
 			nullableFloat(update.OutputCost),
 			nullableFloat(update.TotalCost),
+			update.CostSource,
 			update.Caveat,
 			update.ID,
 		); err != nil {

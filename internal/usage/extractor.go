@@ -107,17 +107,25 @@ func ExtractFromChatResponse(resp *core.ChatResponse, requestID, provider, endpo
 		buildRawUsageFromDetails(resp.Usage.PromptTokensDetails, resp.Usage.CompletionTokensDetails),
 	)
 
-	// Calculate granular costs if pricing is provided
-	if len(pricing) > 0 && pricing[0] != nil {
-		effectivePricing := pricingForEndpoint(pricing[0], endpoint)
-		costResult := CalculateGranularCost(entry.InputTokens, entry.OutputTokens, entry.RawData, provider, effectivePricing)
-		entry.InputCost = costResult.InputCost
-		entry.OutputCost = costResult.OutputCost
-		entry.TotalCost = costResult.TotalCost
-		entry.CostsCalculationCaveat = costResult.Caveat
-	}
+	applyUsageCosts(entry, provider, endpoint, pricing...)
 
 	return entry
+}
+
+func applyUsageCosts(entry *UsageEntry, provider, endpoint string, pricing ...*core.ModelPricing) {
+	if entry == nil {
+		return
+	}
+	var effectivePricing *core.ModelPricing
+	if len(pricing) > 0 && pricing[0] != nil {
+		effectivePricing = pricingForEndpoint(pricing[0], endpoint)
+	}
+	costResult := CalculateUsageCost(entry.InputTokens, entry.OutputTokens, entry.RawData, provider, effectivePricing)
+	entry.InputCost = costResult.InputCost
+	entry.OutputCost = costResult.OutputCost
+	entry.TotalCost = costResult.TotalCost
+	entry.CostSource = costResult.Source
+	entry.CostsCalculationCaveat = costResult.Caveat
 }
 
 // cloneRawData creates a shallow copy of the raw data map to prevent races
@@ -163,15 +171,7 @@ func ExtractFromResponsesResponse(resp *core.ResponsesResponse, requestID, provi
 		)
 	}
 
-	// Calculate granular costs if pricing is provided
-	if len(pricing) > 0 && pricing[0] != nil {
-		effectivePricing := pricingForEndpoint(pricing[0], endpoint)
-		costResult := CalculateGranularCost(entry.InputTokens, entry.OutputTokens, entry.RawData, provider, effectivePricing)
-		entry.InputCost = costResult.InputCost
-		entry.OutputCost = costResult.OutputCost
-		entry.TotalCost = costResult.TotalCost
-		entry.CostsCalculationCaveat = costResult.Caveat
-	}
+	applyUsageCosts(entry, provider, endpoint, pricing...)
 
 	return entry
 }
@@ -196,14 +196,7 @@ func ExtractFromEmbeddingResponse(resp *core.EmbeddingResponse, requestID, provi
 		TotalTokens: resp.Usage.TotalTokens,
 	}
 
-	if len(pricing) > 0 && pricing[0] != nil {
-		effectivePricing := pricingForEndpoint(pricing[0], endpoint)
-		costResult := CalculateGranularCost(entry.InputTokens, entry.OutputTokens, entry.RawData, provider, effectivePricing)
-		entry.InputCost = costResult.InputCost
-		entry.OutputCost = costResult.OutputCost
-		entry.TotalCost = costResult.TotalCost
-		entry.CostsCalculationCaveat = costResult.Caveat
-	}
+	applyUsageCosts(entry, provider, endpoint, pricing...)
 
 	return entry
 }
@@ -238,15 +231,7 @@ func ExtractFromSSEUsage(
 		entry.RawData = cloneRawData(rawData)
 	}
 
-	// Calculate granular costs if pricing is provided
-	if len(pricing) > 0 && pricing[0] != nil {
-		effectivePricing := pricingForEndpoint(pricing[0], endpoint)
-		costResult := CalculateGranularCost(entry.InputTokens, entry.OutputTokens, entry.RawData, provider, effectivePricing)
-		entry.InputCost = costResult.InputCost
-		entry.OutputCost = costResult.OutputCost
-		entry.TotalCost = costResult.TotalCost
-		entry.CostsCalculationCaveat = costResult.Caveat
-	}
+	applyUsageCosts(entry, provider, endpoint, pricing...)
 
 	return entry
 }

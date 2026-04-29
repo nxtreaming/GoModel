@@ -87,7 +87,7 @@ record-api:
 	@echo "Done! Golden files saved to tests/contract/testdata/"
 
 swagger:
-	go run github.com/swaggo/swag/cmd/swag init --generalInfo main.go \
+	go run github.com/swaggo/swag/v2/cmd/swag init --generalInfo main.go \
 		--dir cmd/gomodel,internal \
 		--output cmd/gomodel/docs \
 		--outputTypes go \
@@ -99,7 +99,7 @@ docs-openapi:
 	@command -v npx >/dev/null 2>&1 || { echo "npx is required; install npm (includes npx)" >&2; exit 1; }
 	@tmp_dir=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp_dir"' EXIT; \
-	go run github.com/swaggo/swag/cmd/swag init --quiet --generalInfo main.go \
+	go run github.com/swaggo/swag/v2/cmd/swag init --quiet --generalInfo main.go \
 		--dir cmd/gomodel,internal \
 		--output "$$tmp_dir" \
 		--outputTypes json \

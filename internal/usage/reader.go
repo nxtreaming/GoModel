@@ -92,6 +92,7 @@ type UsageLogEntry struct {
 	InputCost              *float64       `json:"input_cost"`
 	OutputCost             *float64       `json:"output_cost"`
 	TotalCost              *float64       `json:"total_cost"`
+	CostSource             string         `json:"cost_source,omitempty"`
 	RawData                map[string]any `json:"raw_data,omitempty"`
 	CostsCalculationCaveat string         `json:"costs_calculation_caveat,omitempty"`
 }

@@ -217,6 +217,11 @@ func mongoRecalculationUpdate(update recalculationUpdate) bson.D {
 	} else {
 		unset = append(unset, bson.E{Key: "total_cost", Value: ""})
 	}
+	if strings.TrimSpace(update.CostSource) != "" {
+		set = append(set, bson.E{Key: "cost_source", Value: strings.TrimSpace(update.CostSource)})
+	} else {
+		unset = append(unset, bson.E{Key: "cost_source", Value: ""})
+	}
 
 	result := bson.D{{Key: "$set", Value: set}}
 	if len(unset) > 0 {

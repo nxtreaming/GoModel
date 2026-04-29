@@ -14,6 +14,6 @@ func SwaggerAvailable() bool {
 
 func registerSwagger(e *echo.Echo, cfg *Config) {
 	if cfg != nil && cfg.SwaggerEnabled {
-		e.GET("/swagger/*", echoswagger.WrapHandler)
+		e.GET("/swagger/*", echoswagger.WrapHandlerV3)
 	}
 }

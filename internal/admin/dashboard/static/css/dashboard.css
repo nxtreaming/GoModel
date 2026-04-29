@@ -3031,6 +3031,16 @@ body.conversation-drawer-open {
   margin-left: 4px;
 }
 
+.cost-source-icon {
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+  color: var(--success);
+  cursor: help;
+  vertical-align: -2px;
+  stroke-width: 2;
+}
+
 /* Pagination */
 .pagination {
   display: flex;

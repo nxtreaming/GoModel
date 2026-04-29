@@ -298,6 +298,9 @@
                     }
                     this.usageLog = payload;
                     if (!this.usageLog.entries) this.usageLog.entries = [];
+                    if (typeof this.renderIconsAfterUpdate === 'function') {
+                        this.renderIconsAfterUpdate();
+                    }
                 } catch (e) {
                     if (typeof this._isAbortError === 'function' && this._isAbortError(e)) {
                         return;
@@ -350,6 +353,17 @@
                     }
                 });
                 return [...set].sort();
+            },
+
+            usesOpenRouterCreditPricing(entry) {
+                return String((entry && entry.cost_source) || '').trim() === 'openrouter_credits';
+            },
+
+            costSourceTooltip(entry) {
+                if (this.usesOpenRouterCreditPricing(entry)) {
+                    return 'Costs from OpenRouter USD-based credits.';
+                }
+                return '';
             }
         };
     }

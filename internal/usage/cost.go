@@ -1,11 +1,20 @@
 package usage
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gomodel/internal/core"
+)
+
+const (
+	CostSourceModelPricing      = "model_pricing"
+	CostSourceOpenRouterCredits = "openrouter_credits"
 )
 
 // CostResult holds the result of a granular cost calculation.
@@ -14,6 +23,7 @@ type CostResult struct {
 	OutputCost *float64
 	TotalCost  *float64
 	Caveat     string
+	Source     string
 }
 
 // costSide indicates whether a token cost contributes to input or output.
@@ -201,6 +211,7 @@ func CalculateGranularCost(inputTokens, outputTokens int, rawData map[string]any
 	if hasInput || hasOutput {
 		total := inputCost + outputCost
 		result.TotalCost = &total
+		result.Source = CostSourceModelPricing
 	}
 
 	// Sort caveats for deterministic output
@@ -248,4 +259,145 @@ func extractInt(data map[string]any, key string) int {
 // isTokenField returns true if the key looks like a token count field.
 func isTokenField(key string) bool {
 	return strings.HasSuffix(key, "_tokens") || strings.HasSuffix(key, "_count")
+}
+
+// CalculateUsageCost prefers provider-supplied exact costs when available and
+// falls back to static model pricing otherwise.
+func CalculateUsageCost(inputTokens, outputTokens int, rawData map[string]any, providerType string, pricing *core.ModelPricing) CostResult {
+	if result, ok := openRouterCreditCost(rawData, providerType); ok {
+		return result
+	}
+	return CalculateGranularCost(inputTokens, outputTokens, rawData, providerType, pricing)
+}
+
+func openRouterCreditCost(rawData map[string]any, providerType string) (CostResult, bool) {
+	if !isOpenRouterProvider(providerType) {
+		return CostResult{}, false
+	}
+	total, ok := extractFloat(rawData, "cost")
+	if !ok || !isFiniteCost(total) || total < 0 {
+		return CostResult{}, false
+	}
+
+	// OpenRouter reports cost in credits; their credit system is USD-based, so
+	// this is the right value for GoModel's existing USD cost fields.
+	result := CostResult{
+		TotalCost: &total,
+		Source:    CostSourceOpenRouterCredits,
+	}
+	if inputCost, outputCost, ok := openRouterCreditCostSplit(rawData, total); ok {
+		result.InputCost = &inputCost
+		result.OutputCost = &outputCost
+	}
+	return result, true
+}
+
+func isOpenRouterProvider(providerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), "openrouter")
+}
+
+func openRouterCreditCostSplit(rawData map[string]any, total float64) (float64, float64, bool) {
+	details, ok := nestedUsageMap(rawData["cost_details"])
+	if !ok {
+		return 0, 0, false
+	}
+
+	input, inputOK := firstNestedFloat(details,
+		"upstream_inference_prompt_cost",
+		"upstream_inference_input_cost",
+	)
+	output, outputOK := firstNestedFloat(details,
+		"upstream_inference_completions_cost",
+		"upstream_inference_completion_cost",
+		"upstream_inference_output_cost",
+	)
+	if !inputOK || !outputOK || !isFiniteCost(input) || !isFiniteCost(output) || input < 0 || output < 0 {
+		return 0, 0, false
+	}
+
+	if !costsNearlyEqual(input+output, total) {
+		return 0, 0, false
+	}
+	return input, output, true
+}
+
+func isFiniteCost(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func firstNestedFloat(data map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if value, ok := extractFloat(data, key); ok {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func nestedUsageMap(value any) (map[string]any, bool) {
+	if typed, ok := value.(map[string]any); ok {
+		return typed, true
+	}
+	reflected := reflect.ValueOf(value)
+	if !reflected.IsValid() || reflected.Kind() != reflect.Map || reflected.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	out := make(map[string]any, reflected.Len())
+	iter := reflected.MapRange()
+	for iter.Next() {
+		out[iter.Key().String()] = iter.Value().Interface()
+	}
+	return out, true
+}
+
+func extractFloat(data map[string]any, key string) (float64, bool) {
+	if len(data) == 0 {
+		return 0, false
+	}
+	value, ok := data[key]
+	if !ok {
+		return 0, false
+	}
+	return numericFloat(value)
+}
+
+func numericFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int8:
+		return float64(typed), true
+	case int16:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint:
+		return float64(typed), true
+	case uint8:
+		return float64(typed), true
+	case uint16:
+		return float64(typed), true
+	case uint32:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	case json.Number:
+		f, err := strconv.ParseFloat(typed.String(), 64)
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func costsNearlyEqual(a, b float64) bool {
+	return math.Abs(a-b) <= max(1e-12, math.Abs(b)*1e-6)
 }

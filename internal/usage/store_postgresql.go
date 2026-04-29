@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	usageInsertColumnCount     = 18
+	usageInsertColumnCount     = 19
 	postgresMaxBindParameters  = 65535
 	usageInsertMaxRowsPerQuery = postgresMaxBindParameters / usageInsertColumnCount
 )
@@ -22,7 +22,7 @@ const (
 const usageInsertPrefix = `
 		INSERT INTO usage (id, request_id, provider_id, timestamp, model, provider, provider_name,
 			endpoint, user_path, cache_type, input_tokens, output_tokens, total_tokens, raw_data,
-			input_cost, output_cost, total_cost, costs_calculation_caveat)
+			input_cost, output_cost, total_cost, cost_source, costs_calculation_caveat)
 		VALUES `
 
 const usageInsertSuffix = `
@@ -79,6 +79,7 @@ func NewPostgreSQLStore(pool *pgxpool.Pool, retentionDays int) (*PostgreSQLStore
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS input_cost DOUBLE PRECISION",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS output_cost DOUBLE PRECISION",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS total_cost DOUBLE PRECISION",
+		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS cost_source TEXT DEFAULT ''",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS costs_calculation_caveat TEXT DEFAULT ''",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS provider_name TEXT",
 		"ALTER TABLE usage ADD COLUMN IF NOT EXISTS user_path TEXT",
@@ -221,6 +222,7 @@ func buildUsageInsert(entries []*UsageEntry) (string, []any) {
 			entry.InputCost,
 			entry.OutputCost,
 			entry.TotalCost,
+			entry.CostSource,
 			entry.CostsCalculationCaveat,
 		)
 	}

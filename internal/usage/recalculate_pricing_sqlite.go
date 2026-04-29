@@ -24,7 +24,7 @@ func (s *SQLiteStore) RecalculatePricing(ctx context.Context, params Recalculate
 
 	stmt, err := tx.PrepareContext(ctx, `
 		UPDATE usage
-		SET input_cost = ?, output_cost = ?, total_cost = ?, costs_calculation_caveat = ?
+		SET input_cost = ?, output_cost = ?, total_cost = ?, cost_source = ?, costs_calculation_caveat = ?
 		WHERE id = ?
 	`)
 	if err != nil {
@@ -49,6 +49,7 @@ func (s *SQLiteStore) RecalculatePricing(ctx context.Context, params Recalculate
 				nullableFloat(update.InputCost),
 				nullableFloat(update.OutputCost),
 				nullableFloat(update.TotalCost),
+				update.CostSource,
 				update.Caveat,
 				update.ID,
 			); err != nil {
