@@ -119,10 +119,35 @@ function ensureRequiredProperty(schemaName, propertyName) {
   target.required = Array.from(required).sort();
 }
 
+function applyArrayMaxItems(operationPath, method, statusCode, maxItems) {
+  const op = spec.paths?.[operationPath]?.[method];
+  if (!op) {
+    throw new Error(`missing OpenAPI operation: ${method.toUpperCase()} ${operationPath}`);
+  }
+  const response = op.responses?.[statusCode];
+  if (!response) {
+    throw new Error(`missing response ${statusCode} on ${method.toUpperCase()} ${operationPath}`);
+  }
+  const schemaRef = response.content?.["application/json"]?.schema || response.schema;
+  if (!schemaRef || schemaRef.type !== "array") {
+    throw new Error(`expected array schema on ${method.toUpperCase()} ${operationPath} ${statusCode}`);
+  }
+  schemaRef.maxItems = maxItems;
+  if (!schemaRef.description) {
+    schemaRef.description = `Bounded by maxItems=${maxItems}.`;
+  }
+}
+
 spec.servers = parseServers(process.env.DOCS_API_SERVERS);
 ensureResponsesInputElementSchema();
 ensureBearerAuthSecurityScheme();
 ensureRequiredProperty("admin.recalculatePricingRequest", "confirmation");
+
+// Bound the registry-backed admin model listing so OpenAPI consumers (and
+// security scanners like CKV_OPENAPI_21) see an explicit upper limit. The
+// runtime registry is bounded by configured providers and the backing
+// model list; 10000 leaves substantial headroom for that worst case.
+applyArrayMaxItems("/admin/api/v1/models", "get", "200", 10000);
 
 for (const name of [
   "core.ResponsesRequest",

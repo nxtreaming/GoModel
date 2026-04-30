@@ -1345,6 +1345,37 @@ func (c *countingRegistryMockProvider) ListModels(ctx context.Context) (*core.Mo
 	return c.registryMockProvider.ListModels(ctx)
 }
 
+// TestApplyProviderRuntimeUpdates_ClearsStaleErrorOnSuccessfulRefresh locks the
+// behavior that a successful refresh (non-zero fetchAt + empty fetch error)
+// clears any error left over from a previous failed refresh, regardless of
+// whether the success bumps lastModelFetchSuccessAt. The allowlist case is
+// the original motivator: SuccessAt stays nil because upstream is never
+// called, but a stale error must not survive into runtime status.
+func TestApplyProviderRuntimeUpdates_ClearsStaleErrorOnSuccessfulRefresh(t *testing.T) {
+	registry := NewModelRegistry()
+
+	// Seed runtime state with a prior error.
+	registry.providerRuntime["test"] = providerRuntimeState{
+		registered:          true,
+		lastModelFetchAt:    time.Now().Add(-time.Hour),
+		lastModelFetchError: "previous upstream failure",
+	}
+
+	// Apply a successful refresh that produced usable models without
+	// touching upstream — mimics allowlist mode.
+	registry.applyProviderRuntimeUpdatesLocked(map[string]providerRuntimeState{
+		"test": {
+			registered:       true,
+			lastModelFetchAt: time.Now(),
+			// lastModelFetchError intentionally empty; SuccessAt deliberately zero.
+		},
+	})
+
+	if got := registry.providerRuntime["test"].lastModelFetchError; got != "" {
+		t.Fatalf("lastModelFetchError = %q, want empty after successful refresh", got)
+	}
+}
+
 func TestStartBackgroundRefresh(t *testing.T) {
 	t.Run("RefreshesAtInterval", func(t *testing.T) {
 		var refreshCount atomic.Int32

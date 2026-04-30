@@ -1074,6 +1074,52 @@ func TestAuditLog_InvalidStream(t *testing.T) {
 	}
 }
 
+func TestAuditLog_InvalidLimit(t *testing.T) {
+	cases := []string{"abc", "0", "-1"}
+	for _, q := range cases {
+		t.Run(q, func(t *testing.T) {
+			reader := &mockAuditReader{
+				logResult: &auditlog.LogListResult{Entries: []auditlog.LogEntry{}},
+			}
+			h := NewHandler(nil, nil, WithAuditReader(reader))
+			c, rec := newHandlerContext("/admin/api/v1/audit/log?limit=" + q)
+
+			if err := h.AuditLog(c); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for limit=%q, got %d", q, rec.Code)
+			}
+			if !containsString(rec.Body.String(), "invalid_request_error") {
+				t.Errorf("expected invalid_request_error in body for limit=%q, got: %s", q, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuditLog_InvalidOffset(t *testing.T) {
+	cases := []string{"abc", "-1"}
+	for _, q := range cases {
+		t.Run(q, func(t *testing.T) {
+			reader := &mockAuditReader{
+				logResult: &auditlog.LogListResult{Entries: []auditlog.LogEntry{}},
+			}
+			h := NewHandler(nil, nil, WithAuditReader(reader))
+			c, rec := newHandlerContext("/admin/api/v1/audit/log?offset=" + q)
+
+			if err := h.AuditLog(c); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 for offset=%q, got %d", q, rec.Code)
+			}
+			if !containsString(rec.Body.String(), "invalid_request_error") {
+				t.Errorf("expected invalid_request_error in body for offset=%q, got: %s", q, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestAuditLog_Error(t *testing.T) {
 	reader := &mockAuditReader{
 		logErr: core.NewProviderError("test", http.StatusBadGateway, "upstream failed", nil),
@@ -1211,6 +1257,59 @@ func TestAuditConversation_Error(t *testing.T) {
 	}
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("expected 502, got %d", rec.Code)
+	}
+}
+
+// --- Validation-before-fast-path tests ---
+//
+// AuditLog, AuditConversation, and UsageLog all short-circuit to an empty
+// success payload when their reader is nil. These tests assert that request-
+// shape validation runs *before* that fast path, so callers get a 400 for
+// missing/malformed required params regardless of whether the underlying
+// reader is wired up.
+
+func TestAuditLog_NilReaderStillValidatesParams(t *testing.T) {
+	h := NewHandler(nil, nil) // no audit reader configured
+	c, rec := newHandlerContext("/admin/api/v1/audit/log?status_code=not-an-int")
+
+	if err := h.AuditLog(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+	if !containsString(rec.Body.String(), "invalid_request_error") {
+		t.Errorf("expected invalid_request_error, got: %s", rec.Body.String())
+	}
+}
+
+func TestAuditConversation_NilReaderStillValidatesParams(t *testing.T) {
+	h := NewHandler(nil, nil) // no audit reader configured
+	c, rec := newHandlerContext("/admin/api/v1/audit/conversation") // missing required log_id
+
+	if err := h.AuditConversation(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+	if !containsString(rec.Body.String(), "log_id is required") {
+		t.Errorf("expected log_id-is-required, got: %s", rec.Body.String())
+	}
+}
+
+func TestUsageLog_NilReaderStillValidatesParams(t *testing.T) {
+	h := NewHandler(nil, nil) // no usage reader configured
+	c, rec := newHandlerContext("/admin/api/v1/usage/log?start_date=not-a-date")
+
+	if err := h.UsageLog(c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+	if !containsString(rec.Body.String(), "invalid_request_error") {
+		t.Errorf("expected invalid_request_error, got: %s", rec.Body.String())
 	}
 }
 

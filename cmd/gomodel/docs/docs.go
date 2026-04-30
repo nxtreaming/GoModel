@@ -633,6 +633,83 @@ const docTemplate = `{
                 ]
             }
         },
+        "/admin/api/v1/dashboard/config": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "Get dashboard runtime configuration",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/admin.DashboardConfigResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
+        "/admin/api/v1/models": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "List all registered models with provider info and access state",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Filter by model category",
+                        "name": "category",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/admin.modelInventoryResponse"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/core.GatewayError"
+                        }
+                    }
+                },
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ]
+            }
+        },
         "/admin/api/v1/models/categories": {
             "get": {
                 "produces": [
@@ -3042,6 +3119,38 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "admin.DashboardConfigResponse": {
+            "type": "object",
+            "properties": {
+                "BUDGETS_ENABLED": {
+                    "type": "string"
+                },
+                "CACHE_ENABLED": {
+                    "type": "string"
+                },
+                "FEATURE_FALLBACK_MODE": {
+                    "type": "string"
+                },
+                "GUARDRAILS_ENABLED": {
+                    "type": "string"
+                },
+                "LOGGING_ENABLED": {
+                    "type": "string"
+                },
+                "REDIS_URL": {
+                    "type": "string"
+                },
+                "SEMANTIC_CACHE_ENABLED": {
+                    "type": "string"
+                },
+                "USAGE_ENABLED": {
+                    "type": "string"
+                },
+                "USAGE_PRICING_RECALCULATION_ENABLED": {
+                    "type": "string"
+                }
+            }
+        },
         "admin.auditLogEntryResponse": {
             "type": "object",
             "properties": {
@@ -3204,6 +3313,49 @@ const docTemplate = `{
                     "type": "number"
                 },
                 "user_path": {
+                    "type": "string"
+                }
+            }
+        },
+        "admin.modelAccessResponse": {
+            "type": "object",
+            "properties": {
+                "default_enabled": {
+                    "type": "boolean"
+                },
+                "effective_enabled": {
+                    "type": "boolean"
+                },
+                "override": {
+                    "$ref": "#/definitions/modeloverrides.Override"
+                },
+                "selector": {
+                    "type": "string"
+                },
+                "user_paths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "admin.modelInventoryResponse": {
+            "type": "object",
+            "properties": {
+                "access": {
+                    "$ref": "#/definitions/admin.modelAccessResponse"
+                },
+                "model": {
+                    "$ref": "#/definitions/core.Model"
+                },
+                "provider_name": {
+                    "type": "string"
+                },
+                "provider_type": {
+                    "type": "string"
+                },
+                "selector": {
                     "type": "string"
                 }
             }
@@ -4766,6 +4918,32 @@ const docTemplate = `{
                 },
                 "total_tokens": {
                     "type": "integer"
+                }
+            }
+        },
+        "modeloverrides.Override": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "model": {
+                    "type": "string"
+                },
+                "provider_name": {
+                    "type": "string"
+                },
+                "selector": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "user_paths": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
