@@ -1807,6 +1807,137 @@ func TestClassifyProviderStatus_DerivesCachedModelInventory(t *testing.T) {
 	}
 }
 
+// TestBuildProviderStatusItem_ClassifyAndDisplayFallbacks covers the contract
+// of buildProviderStatusItem — that classifyProviderStatus runs against the
+// original inputs (so runtime-only providers reach the "Unknown" branch) and
+// that the response row's Config/Runtime then gets Name/Type synthesised from
+// whichever side has the value.
+func TestBuildProviderStatusItem_ClassifyAndDisplayFallbacks(t *testing.T) {
+	cases := []struct {
+		name        string
+		key         string
+		cfg         providers.SanitizedProviderConfig
+		runtime     providers.ProviderRuntimeSnapshot
+		wantStatus  string
+		wantLabel   string
+		wantCfgName string
+		wantCfgType string
+		wantRunName string
+		wantRunTyp  string
+	}{
+		{
+			// Runtime-only: registry knows the provider but no operator config.
+			// Must hit the "Unknown" branch — synthesising cfg.Name first
+			// would mislabel this as "Configured".
+			name:        "runtime_only_unknown",
+			key:         "shadow",
+			cfg:         providers.SanitizedProviderConfig{},
+			runtime:     providers.ProviderRuntimeSnapshot{Name: "shadow", Type: "openai", Registered: true},
+			wantStatus:  "degraded",
+			wantLabel:   "Unknown",
+			wantCfgName: "shadow",
+			wantCfgType: "openai",
+			wantRunName: "shadow",
+			wantRunTyp:  "openai",
+		},
+		{
+			// Config-only: operator wired the provider but the registry has
+			// not produced a runtime snapshot yet.
+			name:        "config_only_starting",
+			key:         "openai",
+			cfg:         providers.SanitizedProviderConfig{Name: "openai", Type: "openai"},
+			runtime:     providers.ProviderRuntimeSnapshot{},
+			wantStatus:  "degraded",
+			wantLabel:   "Starting",
+			wantCfgName: "openai",
+			wantCfgType: "openai",
+			wantRunName: "openai",
+			wantRunTyp:  "openai",
+		},
+		{
+			// Config + registered + zero models: existing "Configured" path,
+			// guarded by TestClassifyProviderStatus_RegisteredZeroModelProviderIsConfigured
+			// at the classifier level — re-asserted here through the wrapper.
+			name:        "configured_zero_models",
+			key:         "openai",
+			cfg:         providers.SanitizedProviderConfig{Name: "openai", Type: "openai"},
+			runtime:     providers.ProviderRuntimeSnapshot{Name: "openai", Type: "openai", Registered: true},
+			wantStatus:  "degraded",
+			wantLabel:   "Configured",
+			wantCfgName: "openai",
+			wantCfgType: "openai",
+			wantRunName: "openai",
+			wantRunTyp:  "openai",
+		},
+		{
+			// Healthy: discovery succeeded.
+			name: "healthy",
+			key:  "openai",
+			cfg:  providers.SanitizedProviderConfig{Name: "openai", Type: "openai"},
+			runtime: providers.ProviderRuntimeSnapshot{
+				Name:                    "openai",
+				Type:                    "openai",
+				Registered:              true,
+				DiscoveredModelCount:    7,
+				LastModelFetchSuccessAt: timePtr(time.Now()),
+			},
+			wantStatus:  "healthy",
+			wantLabel:   "Healthy",
+			wantCfgName: "openai",
+			wantCfgType: "openai",
+			wantRunName: "openai",
+			wantRunTyp:  "openai",
+		},
+		{
+			// Type only known to the runtime side: cfg.Type should be filled
+			// from runtime.Type so the response row carries a usable label.
+			name:        "type_filled_from_runtime",
+			key:         "custom",
+			cfg:         providers.SanitizedProviderConfig{Name: "custom"},
+			runtime:     providers.ProviderRuntimeSnapshot{Name: "custom", Type: "ollama", Registered: true},
+			wantStatus:  "degraded",
+			wantLabel:   "Configured",
+			wantCfgName: "custom",
+			wantCfgType: "ollama",
+			wantRunName: "custom",
+			wantRunTyp:  "ollama",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := buildProviderStatusItem(tc.key, tc.cfg, tc.runtime)
+
+			if item.Name != tc.key {
+				t.Errorf("Name = %q, want %q", item.Name, tc.key)
+			}
+			if item.Status != tc.wantStatus {
+				t.Errorf("Status = %q, want %q", item.Status, tc.wantStatus)
+			}
+			if item.StatusLabel != tc.wantLabel {
+				t.Errorf("StatusLabel = %q, want %q", item.StatusLabel, tc.wantLabel)
+			}
+			if item.Config.Name != tc.wantCfgName {
+				t.Errorf("Config.Name = %q, want %q", item.Config.Name, tc.wantCfgName)
+			}
+			if item.Config.Type != tc.wantCfgType {
+				t.Errorf("Config.Type = %q, want %q", item.Config.Type, tc.wantCfgType)
+			}
+			if item.Runtime.Name != tc.wantRunName {
+				t.Errorf("Runtime.Name = %q, want %q", item.Runtime.Name, tc.wantRunName)
+			}
+			if item.Runtime.Type != tc.wantRunTyp {
+				t.Errorf("Runtime.Type = %q, want %q", item.Runtime.Type, tc.wantRunTyp)
+			}
+			if item.Type != tc.wantCfgType {
+				t.Errorf("Type = %q, want %q", item.Type, tc.wantCfgType)
+			}
+		})
+	}
+}
+
+func timePtr(t time.Time) *time.Time { return &t }
+
 func TestDashboardConfig_ReturnsAllowlistedRuntimeFlags(t *testing.T) {
 	h := NewHandler(nil, nil, WithDashboardRuntimeConfig(DashboardConfigResponse{
 		FeatureFallbackMode:  "auto",

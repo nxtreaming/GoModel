@@ -31,28 +31,72 @@ func (r *ModelRegistry) Initialize(ctx context.Context) error {
 }
 
 func (r *ModelRegistry) initialize(ctx context.Context) error {
-	// Get a snapshot of providers with a read lock
+	providers, providerTypes, providerNames := r.snapshotProviders()
+	configuredProviderModels, configuredProviderModelsMode := r.snapshotConfiguredProviderModels()
+
+	fetched := r.fetchAllProviderModels(
+		ctx,
+		providers,
+		providerTypes,
+		providerNames,
+		configuredProviderModels,
+		configuredProviderModelsMode,
+	)
+
+	if fetched.totalModels == 0 {
+		r.applyProviderRuntimeUpdates(fetched.runtimeUpdates)
+		if fetched.failedProviders == len(providers) {
+			return fmt.Errorf("failed to fetch models from any provider")
+		}
+		return fmt.Errorf("no models available: providers returned empty model lists")
+	}
+
+	r.applyFetchedInventory(providerTypes, fetched, len(providers))
+	return nil
+}
+
+// snapshotProviders copies the registry's provider slice and type/name maps
+// under a read lock so the rest of initialize can run without contending with
+// readers.
+func (r *ModelRegistry) snapshotProviders() ([]core.Provider, map[core.Provider]string, map[core.Provider]string) {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	providers := make([]core.Provider, len(r.providers))
 	copy(providers, r.providers)
-	r.mu.RUnlock()
-
-	// Build new model maps without holding the lock.
-	// This allows concurrent reads to continue using the existing map
-	// while we fetch models from providers (which may involve network calls).
-	newModels := make(map[string]*ModelInfo)
-	newModelsByProvider := make(map[string]map[string]*ModelInfo)
-	var totalModels int
-	var failedProviders int
-	runtimeUpdates := make(map[string]providerRuntimeState)
-
-	r.mu.RLock()
 	providerTypes := make(map[core.Provider]string, len(r.providerTypes))
 	providerNames := make(map[core.Provider]string, len(r.providerNames))
 	maps.Copy(providerTypes, r.providerTypes)
 	maps.Copy(providerNames, r.providerNames)
-	r.mu.RUnlock()
-	configuredProviderModels, configuredProviderModelsMode := r.snapshotConfiguredProviderModels()
+	return providers, providerTypes, providerNames
+}
+
+// fetchedInventory captures the result of one full provider fetch sweep.
+// Shared by initial population and full refresh.
+type fetchedInventory struct {
+	models           map[string]*ModelInfo
+	modelsByProvider map[string]map[string]*ModelInfo
+	runtimeUpdates   map[string]providerRuntimeState
+	totalModels      int
+	failedProviders  int
+}
+
+// fetchAllProviderModels runs ListModels (or applies a configured allowlist)
+// for every registered provider and aggregates the results. Network calls
+// happen outside any registry lock so live readers keep serving the previous
+// inventory.
+func (r *ModelRegistry) fetchAllProviderModels(
+	ctx context.Context,
+	providers []core.Provider,
+	providerTypes map[core.Provider]string,
+	providerNames map[core.Provider]string,
+	configuredProviderModels map[string][]string,
+	configuredProviderModelsMode config.ConfiguredProviderModelsMode,
+) fetchedInventory {
+	out := fetchedInventory{
+		models:           make(map[string]*ModelInfo),
+		modelsByProvider: make(map[string]map[string]*ModelInfo),
+		runtimeUpdates:   make(map[string]providerRuntimeState),
+	}
 
 	for _, provider := range providers {
 		providerName := providerNames[provider]
@@ -95,8 +139,8 @@ func (r *ModelRegistry) initialize(ctx context.Context) error {
 				"provider", providerName,
 				"error", err,
 			)
-			failedProviders++
-			runtimeUpdates[providerName] = providerRuntimeState{
+			out.failedProviders++
+			out.runtimeUpdates[providerName] = providerRuntimeState{
 				registered:          true,
 				lastModelFetchAt:    fetchAt,
 				lastModelFetchError: err.Error(),
@@ -110,8 +154,8 @@ func (r *ModelRegistry) initialize(ctx context.Context) error {
 				"provider", providerName,
 				"error", err,
 			)
-			failedProviders++
-			runtimeUpdates[providerName] = providerRuntimeState{
+			out.failedProviders++
+			out.runtimeUpdates[providerName] = providerRuntimeState{
 				registered:          true,
 				lastModelFetchAt:    fetchAt,
 				lastModelFetchError: err.Error(),
@@ -124,13 +168,13 @@ func (r *ModelRegistry) initialize(ctx context.Context) error {
 			slog.Warn("provider returned empty model list",
 				"provider", providerName,
 			)
-			runtimeUpdates[providerName] = providerRuntimeState{
+			out.runtimeUpdates[providerName] = providerRuntimeState{
 				registered:          true,
 				lastModelFetchAt:    fetchAt,
 				lastModelFetchError: err.Error(),
 			}
-			if _, ok := newModelsByProvider[providerName]; !ok {
-				newModelsByProvider[providerName] = make(map[string]*ModelInfo)
+			if _, ok := out.modelsByProvider[providerName]; !ok {
+				out.modelsByProvider[providerName] = make(map[string]*ModelInfo)
 			}
 			continue
 		}
@@ -143,10 +187,10 @@ func (r *ModelRegistry) initialize(ctx context.Context) error {
 		if configuredReason == configuredProviderModelsNotApplied {
 			runtimeUpdate.lastModelFetchSuccessAt = fetchAt
 		}
-		runtimeUpdates[providerName] = runtimeUpdate
+		out.runtimeUpdates[providerName] = runtimeUpdate
 
-		if _, ok := newModelsByProvider[providerName]; !ok {
-			newModelsByProvider[providerName] = make(map[string]*ModelInfo, len(resp.Data))
+		if _, ok := out.modelsByProvider[providerName]; !ok {
+			out.modelsByProvider[providerName] = make(map[string]*ModelInfo, len(resp.Data))
 		}
 
 		for _, model := range resp.Data {
@@ -156,11 +200,11 @@ func (r *ModelRegistry) initialize(ctx context.Context) error {
 				ProviderName: providerName,
 				ProviderType: providerTypes[provider],
 			}
-			newModelsByProvider[providerName][model.ID] = info
+			out.modelsByProvider[providerName][model.ID] = info
 
-			if _, exists := newModels[model.ID]; exists {
-				// Model already registered by another provider, skip
-				// First provider wins for unqualified lookups.
+			if _, exists := out.models[model.ID]; exists {
+				// First provider wins for unqualified lookups; later duplicates
+				// stay reachable via modelsByProvider but lose the bare-id slot.
 				slog.Debug("model already registered, skipping",
 					"model", model.ID,
 					"provider", providerName,
@@ -169,52 +213,50 @@ func (r *ModelRegistry) initialize(ctx context.Context) error {
 				continue
 			}
 
-			newModels[model.ID] = info
-			totalModels++
+			out.models[model.ID] = info
+			out.totalModels++
 		}
 	}
 
-	if totalModels == 0 {
-		r.applyProviderRuntimeUpdates(runtimeUpdates)
-		if failedProviders == len(providers) {
-			return fmt.Errorf("failed to fetch models from any provider")
-		}
-		return fmt.Errorf("no models available: providers returned empty model lists")
-	}
+	return out
+}
 
-	// Enrich models with metadata from the model list (if loaded)
+// applyFetchedInventory enriches the freshly fetched maps with metadata,
+// atomically swaps them onto the registry, marks initialized, and emits the
+// summary log line.
+func (r *ModelRegistry) applyFetchedInventory(
+	providerTypes map[core.Provider]string,
+	fetched fetchedInventory,
+	totalProviders int,
+) {
 	r.mu.RLock()
 	list := r.modelList
 	r.mu.RUnlock()
 	configOverrides := r.snapshotConfigOverrides()
 	metadataStats := metadataEnrichmentStats{}
 	if list != nil {
-		metadataStats = enrichProviderModelMaps(list, providerTypes, newModelsByProvider, nil)
+		metadataStats = enrichProviderModelMaps(list, providerTypes, fetched.modelsByProvider, nil)
 	}
-	metadataStats.Enriched += applyConfigMetadataOverrides(configOverrides, newModelsByProvider, nil)
+	metadataStats.Enriched += applyConfigMetadataOverrides(configOverrides, fetched.modelsByProvider, nil)
 
-	// Atomically swap the models map and invalidate sorted caches
 	r.mu.Lock()
-	r.models = newModels
-	r.modelsByProvider = newModelsByProvider
-	r.applyProviderRuntimeUpdatesLocked(runtimeUpdates)
+	r.models = fetched.models
+	r.modelsByProvider = fetched.modelsByProvider
+	r.applyProviderRuntimeUpdatesLocked(fetched.runtimeUpdates)
 	r.invalidateSortedCaches()
 	r.mu.Unlock()
 
-	// Mark as initialized
 	r.initMu.Lock()
 	r.initialized = true
 	r.initMu.Unlock()
 
 	attrs := []any{
-		"total_models", totalModels,
-		"providers", len(providers),
-		"failed_providers", failedProviders,
+		"total_models", fetched.totalModels,
+		"providers", totalProviders,
+		"failed_providers", fetched.failedProviders,
 	}
 	attrs = append(attrs, metadataStats.slogAttrs()...)
 	slog.Info("model registry initialized", attrs...)
-
-	return nil
 }
 
 func fetchProviderInventory(
