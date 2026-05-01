@@ -15,7 +15,12 @@ import (
 const (
 	CostSourceModelPricing      = "model_pricing"
 	CostSourceOpenRouterCredits = "openrouter_credits"
+	CostSourceXAITicks          = "xai_cost_in_usd_ticks"
 )
+
+// xAI reports usage.cost_in_usd_ticks as USD-denominated ticks, where 10^10
+// ticks equals 1 USD.
+const xaiUSDTicksPerUSD = 10_000_000_000
 
 // CostResult holds the result of a granular cost calculation.
 type CostResult struct {
@@ -267,6 +272,9 @@ func CalculateUsageCost(inputTokens, outputTokens int, rawData map[string]any, p
 	if result, ok := openRouterCreditCost(rawData, providerType); ok {
 		return result
 	}
+	if result, ok := xaiTicksCost(rawData, providerType); ok {
+		return result
+	}
 	return CalculateGranularCost(inputTokens, outputTokens, rawData, providerType, pricing)
 }
 
@@ -294,6 +302,26 @@ func openRouterCreditCost(rawData map[string]any, providerType string) (CostResu
 
 func isOpenRouterProvider(providerType string) bool {
 	return strings.EqualFold(strings.TrimSpace(providerType), "openrouter")
+}
+
+func xaiTicksCost(rawData map[string]any, providerType string) (CostResult, bool) {
+	if !isXAIProvider(providerType) {
+		return CostResult{}, false
+	}
+	ticks, ok := extractFloat(rawData, "cost_in_usd_ticks")
+	if !ok || !isFiniteCost(ticks) || ticks < 0 {
+		return CostResult{}, false
+	}
+
+	total := ticks / xaiUSDTicksPerUSD
+	return CostResult{
+		TotalCost: &total,
+		Source:    CostSourceXAITicks,
+	}, true
+}
+
+func isXAIProvider(providerType string) bool {
+	return strings.EqualFold(strings.TrimSpace(providerType), "xai")
 }
 
 func openRouterCreditCostSplit(rawData map[string]any, total float64) (float64, float64, bool) {

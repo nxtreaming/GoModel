@@ -7,6 +7,10 @@
             return path;
         }
 
+        function costSource(entry) {
+            return String((entry && entry.cost_source) || '').trim();
+        }
+
         return {
             emptyUsageSummary() {
                 return {
@@ -356,14 +360,23 @@
             },
 
             usesOpenRouterCreditPricing(entry) {
-                return String((entry && entry.cost_source) || '').trim() === 'openrouter_credits';
+                return costSource(entry) === 'openrouter_credits';
+            },
+
+            usesResponseCostPricing(entry) {
+                const source = costSource(entry);
+                return source === 'openrouter_credits' || source === 'xai_cost_in_usd_ticks';
             },
 
             costSourceTooltip(entry) {
-                if (this.usesOpenRouterCreditPricing(entry)) {
+                switch (costSource(entry)) {
+                case 'openrouter_credits':
                     return 'Costs from OpenRouter USD-based credits.';
+                case 'xai_cost_in_usd_ticks':
+                    return 'Costs from xAI usage.cost_in_usd_ticks.';
+                default:
+                    return '';
                 }
-                return '';
             }
         };
     }

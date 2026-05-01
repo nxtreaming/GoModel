@@ -467,6 +467,57 @@ func TestExtractFromChatResponse_OpenRouterCreditCostWithoutStaticPricing(t *tes
 	}
 }
 
+func TestExtractFromChatResponse_XAITicksWithoutStaticPricing(t *testing.T) {
+	resp := &core.ChatResponse{
+		ID:    "chatcmpl-xai",
+		Model: "grok-4.3",
+		Usage: core.Usage{
+			PromptTokens:     199,
+			CompletionTokens: 1,
+			TotalTokens:      200,
+			RawUsage: map[string]any{
+				"cost_in_usd_ticks": float64(158_500),
+			},
+		},
+	}
+
+	entry := ExtractFromChatResponse(resp, "req-xai", "xai", "/v1/chat/completions")
+	if entry == nil {
+		t.Fatal("expected non-nil entry")
+	}
+	if entry.InputCost != nil || entry.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %v/%v, want nil without response split", entry.InputCost, entry.OutputCost)
+	}
+	assertCostPtrNear(t, "TotalCost", entry.TotalCost, 0.00001585)
+	if entry.CostSource != CostSourceXAITicks {
+		t.Fatalf("CostSource = %q, want %q", entry.CostSource, CostSourceXAITicks)
+	}
+}
+
+func TestExtractFromResponsesResponse_XAITicksWithoutStaticPricing(t *testing.T) {
+	resp := &core.ResponsesResponse{
+		ID:    "resp-xai",
+		Model: "grok-4.3",
+		Usage: &core.ResponsesUsage{
+			InputTokens:  199,
+			OutputTokens: 1,
+			TotalTokens:  200,
+			RawUsage: map[string]any{
+				"cost_in_usd_ticks": float64(158_500),
+			},
+		},
+	}
+
+	entry := ExtractFromResponsesResponse(resp, "req-xai-response", "xai", "/v1/responses")
+	if entry == nil {
+		t.Fatal("expected non-nil entry")
+	}
+	assertCostPtrNear(t, "TotalCost", entry.TotalCost, 0.00001585)
+	if entry.CostSource != CostSourceXAITicks {
+		t.Fatalf("CostSource = %q, want %q", entry.CostSource, CostSourceXAITicks)
+	}
+}
+
 func TestExtractFromSSEUsage(t *testing.T) {
 	entry := ExtractFromSSEUsage(
 		"chatcmpl-789",
@@ -804,5 +855,15 @@ func TestExtractFromChatResponse_BatchPrefixOvermatchUsesStandardPricing(t *test
 	}
 	if math.Abs(*entry.TotalCost-8.0) > 1e-9 {
 		t.Errorf("TotalCost = %f, want 8.0", *entry.TotalCost)
+	}
+}
+
+func assertCostPtrNear(t *testing.T, name string, got *float64, want float64) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s is nil, want %f", name, want)
+	}
+	if math.Abs(*got-want) > 1e-9 {
+		t.Fatalf("%s = %f, want %f", name, *got, want)
 	}
 }

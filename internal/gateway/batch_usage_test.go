@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"math"
 	"testing"
 
 	batchstore "gomodel/internal/batch"
@@ -83,5 +84,67 @@ func TestLogBatchUsageFromBatchResultsOnlySetsObservedCostComponents(t *testing.
 	}
 	if got.TotalCost == nil || *got.TotalCost != inputRate {
 		t.Fatalf("TotalCost = %#v, want %.2f", got.TotalCost, inputRate)
+	}
+}
+
+func TestLogBatchUsageFromBatchResultsUsesXAITicks(t *testing.T) {
+	outputRate := 999.0
+	logger := &batchUsageCaptureLogger{config: usage.Config{Enabled: true}}
+	stored := &batchstore.StoredBatch{
+		Batch: &core.BatchResponse{
+			ID:       "batch_xai_ticks",
+			Provider: "xai",
+		},
+		RequestID: "req-batch-xai-ticks",
+	}
+	result := &core.BatchResultsResponse{
+		Object:  "list",
+		BatchID: "batch_xai_ticks",
+		Data: []core.BatchResultItem{
+			{
+				Index:      0,
+				StatusCode: 200,
+				Model:      "grok-4.3",
+				Provider:   "xai",
+				Response: map[string]any{
+					"id":    "resp-xai-batch",
+					"model": "grok-4.3",
+					"usage": map[string]any{
+						"input_tokens":      float64(199),
+						"output_tokens":     float64(1),
+						"total_tokens":      float64(200),
+						"cost_in_usd_ticks": float64(158_500),
+						"num_sources_used":  float64(2),
+					},
+				},
+			},
+		},
+	}
+
+	logged := LogBatchUsageFromBatchResults(
+		stored,
+		result,
+		"",
+		logger,
+		staticBatchPricingResolver{pricing: &core.ModelPricing{OutputPerMtok: &outputRate}},
+	)
+	if !logged {
+		t.Fatal("LogBatchUsageFromBatchResults() = false, want true")
+	}
+	if len(logger.entries) != 1 {
+		t.Fatalf("logged entries = %d, want 1", len(logger.entries))
+	}
+	entry := logger.entries[0]
+	if entry.CostSource != usage.CostSourceXAITicks {
+		t.Fatalf("CostSource = %q, want %q", entry.CostSource, usage.CostSourceXAITicks)
+	}
+	if entry.TotalCost == nil || math.Abs(*entry.TotalCost-0.00001585) > 1e-12 {
+		t.Fatalf("TotalCost = %#v, want 0.00001585", entry.TotalCost)
+	}
+	if entry.InputCost != nil || entry.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %#v/%#v, want nil response split", entry.InputCost, entry.OutputCost)
+	}
+	if stored.Batch.Usage.TotalCost == nil || math.Abs(*stored.Batch.Usage.TotalCost-0.00001585) > 1e-12 {
+		t.Fatalf("stored TotalCost = %#v, want 0.00001585", stored.Batch.Usage.TotalCost)
 	}
 }

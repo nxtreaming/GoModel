@@ -497,6 +497,87 @@ func TestCalculateUsageCost_OpenRouterFallsBackToModelPricingWithoutCredits(t *t
 	}
 }
 
+func TestCalculateUsageCost_XAITicksOverrideStaticPricing(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(100.0),
+		OutputPerMtok: new(100.0),
+	}
+	rawData := map[string]any{
+		"cost_in_usd_ticks": 37_756_000,
+	}
+
+	result := CalculateUsageCost(10, 4, rawData, "xai", pricing)
+
+	if result.InputCost != nil || result.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %v/%v, want nil when xAI supplies only total cost", result.InputCost, result.OutputCost)
+	}
+	assertCostNear(t, "TotalCost", result.TotalCost, 0.0037756)
+	if result.Source != CostSourceXAITicks {
+		t.Fatalf("Source = %q, want %q", result.Source, CostSourceXAITicks)
+	}
+}
+
+func TestCalculateUsageCost_XAITicksAcceptsZeroCost(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(1.0),
+		OutputPerMtok: new(2.0),
+	}
+
+	result := CalculateUsageCost(1_000_000, 500_000, map[string]any{"cost_in_usd_ticks": 0}, "xai", pricing)
+
+	assertCostNear(t, "TotalCost", result.TotalCost, 0)
+	if result.InputCost != nil || result.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %v/%v, want nil when xAI supplies only total cost", result.InputCost, result.OutputCost)
+	}
+	if result.Source != CostSourceXAITicks {
+		t.Fatalf("Source = %q, want %q", result.Source, CostSourceXAITicks)
+	}
+}
+
+func TestCalculateUsageCost_XAITicksFallBackToModelPricingWhenInvalid(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(1.0),
+		OutputPerMtok: new(2.0),
+	}
+	tests := []struct {
+		name  string
+		ticks any
+	}{
+		{name: "negative", ticks: -1},
+		{name: "nan", ticks: math.NaN()},
+		{name: "positive infinity", ticks: math.Inf(1)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := CalculateUsageCost(1_000_000, 500_000, map[string]any{"cost_in_usd_ticks": test.ticks}, "xai", pricing)
+
+			assertCostNear(t, "InputCost", result.InputCost, 1.0)
+			assertCostNear(t, "OutputCost", result.OutputCost, 1.0)
+			assertCostNear(t, "TotalCost", result.TotalCost, 2.0)
+			if result.Source != CostSourceModelPricing {
+				t.Fatalf("Source = %q, want %q", result.Source, CostSourceModelPricing)
+			}
+		})
+	}
+}
+
+func TestCalculateUsageCost_XAITicksIgnoredForOtherProviders(t *testing.T) {
+	pricing := &core.ModelPricing{
+		InputPerMtok:  new(1.0),
+		OutputPerMtok: new(2.0),
+	}
+
+	result := CalculateUsageCost(1_000_000, 500_000, map[string]any{"cost_in_usd_ticks": 37_756_000}, "openai", pricing)
+
+	assertCostNear(t, "InputCost", result.InputCost, 1.0)
+	assertCostNear(t, "OutputCost", result.OutputCost, 1.0)
+	assertCostNear(t, "TotalCost", result.TotalCost, 2.0)
+	if result.Source != CostSourceModelPricing {
+		t.Fatalf("Source = %q, want %q", result.Source, CostSourceModelPricing)
+	}
+}
+
 func TestCalculateGranularCost_InformationalFieldsNoCaveat(t *testing.T) {
 	pricing := &core.ModelPricing{
 		InputPerMtok:  new(2.50),

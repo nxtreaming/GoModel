@@ -186,13 +186,13 @@
                             <td class="col-price">
                                 <span x-text="usageMode === 'costs' ? formatCost(entry.total_cost) : formatNumber(entry.total_tokens)"
                                       :title="usageMode === 'costs' ? formatNumber(entry.total_tokens) + ' tokens\n' + formatCostTooltip(entry) : ''"></span>
-                                <i data-lucide="circle-dollar-sign" class="cost-source-icon" x-show="usageMode === 'costs' && usesOpenRouterCreditPricing(entry)" :title="costSourceTooltip(entry)" aria-hidden="true"></i>
+                                <i data-lucide="circle-dollar-sign" class="cost-source-icon" x-show="usageMode === 'costs' && usesResponseCostPricing(entry)" :title="costSourceTooltip(entry)" aria-hidden="true"></i>
                                 <span class="caveat-icon" x-show="usageMode === 'costs' && entry.costs_calculation_caveat" :title="entry.costs_calculation_caveat">&#9888;</span>
                             </td>
                             <td class="col-price" x-show="usageMode === 'tokens'"
                                 :title="formatCostTooltip(entry)">
                                 <span x-text="formatCost(entry.total_cost)"></span>
-                                <i data-lucide="circle-dollar-sign" class="cost-source-icon" x-show="usesOpenRouterCreditPricing(entry)" :title="costSourceTooltip(entry)" aria-hidden="true"></i>
+                                <i data-lucide="circle-dollar-sign" class="cost-source-icon" x-show="usesResponseCostPricing(entry)" :title="costSourceTooltip(entry)" aria-hidden="true"></i>
                                 <span class="caveat-icon" x-show="entry.costs_calculation_caveat" :title="entry.costs_calculation_caveat">&#9888;</span>
                             </td>
                         </tr>

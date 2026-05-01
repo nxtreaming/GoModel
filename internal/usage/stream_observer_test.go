@@ -2,6 +2,7 @@ package usage
 
 import (
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -165,6 +166,43 @@ func TestStreamUsageObserverOpenRouterCreditCost(t *testing.T) {
 	}
 	if entry.CostSource != CostSourceOpenRouterCredits {
 		t.Fatalf("CostSource = %q, want %q", entry.CostSource, CostSourceOpenRouterCredits)
+	}
+}
+
+func TestStreamUsageObserverXAITickCost(t *testing.T) {
+	logger := &trackingLogger{enabled: true}
+	observer := NewStreamUsageObserver(logger, "grok-4.3", "xai", "req-xai", "/v1/chat/completions", nil)
+	observer.OnJSONEvent(map[string]any{
+		"id":    "chatcmpl-xai",
+		"model": "grok-4.3",
+		"usage": map[string]any{
+			"prompt_tokens":      float64(199),
+			"completion_tokens":  float64(1),
+			"total_tokens":       float64(200),
+			"cost_in_usd_ticks":  float64(158_500),
+			"num_sources_used":   float64(2),
+			"server_tool_calls":  float64(1),
+			"zero_value_ignored": float64(0),
+		},
+	})
+	observer.OnStreamClose()
+
+	entries := logger.getEntries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.RawData == nil || entry.RawData["cost_in_usd_ticks"] != 158_500.0 {
+		t.Fatalf("RawData[cost_in_usd_ticks] = %#v, want 158500", entry.RawData["cost_in_usd_ticks"])
+	}
+	if entry.TotalCost == nil || math.Abs(*entry.TotalCost-0.00001585) > 1e-12 {
+		t.Fatalf("TotalCost = %v, want 0.00001585", entry.TotalCost)
+	}
+	if entry.InputCost != nil || entry.OutputCost != nil {
+		t.Fatalf("InputCost/OutputCost = %v/%v, want nil without response split", entry.InputCost, entry.OutputCost)
+	}
+	if entry.CostSource != CostSourceXAITicks {
+		t.Fatalf("CostSource = %q, want %q", entry.CostSource, CostSourceXAITicks)
 	}
 }
 
@@ -411,7 +449,7 @@ func TestStreamUsageObserverResponsesAPIWithDetailedUsage(t *testing.T) {
 	if entry.RawData["completion_reasoning_tokens"] != 7 {
 		t.Fatalf("RawData[completion_reasoning_tokens] = %v, want 7", entry.RawData["completion_reasoning_tokens"])
 	}
-	if entry.RawData["cost_in_usd_ticks"] != 158500 {
+	if got, ok := numericFloat(entry.RawData["cost_in_usd_ticks"]); !ok || got != 158500 {
 		t.Fatalf("RawData[cost_in_usd_ticks] = %v, want 158500", entry.RawData["cost_in_usd_ticks"])
 	}
 }

@@ -161,7 +161,7 @@ func copyExtendedUsageFields(rawData map[string]any, usageMap map[string]any) {
 		case "prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens",
 			"prompt_tokens_details", "completion_tokens_details", "input_tokens_details", "output_tokens_details":
 			continue
-		case "cost":
+		case "cost", "cost_in_usd_ticks":
 			if numericValue, ok := numericFloat(value); ok && numericValue >= 0 {
 				rawData[key] = numericValue
 			}
