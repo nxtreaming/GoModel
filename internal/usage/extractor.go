@@ -361,11 +361,29 @@ func pricingForEndpoint(pricing *core.ModelPricing, endpoint string) *core.Model
 	}
 
 	effective := *pricing
+	usesBatchInput := false
+	usesBatchOutput := false
 	if pricing.BatchInputPerMtok != nil {
 		effective.InputPerMtok = pricing.BatchInputPerMtok
+		usesBatchInput = true
 	}
 	if pricing.BatchOutputPerMtok != nil {
 		effective.OutputPerMtok = pricing.BatchOutputPerMtok
+		usesBatchOutput = true
+	}
+	if usesBatchInput && usesBatchOutput {
+		effective.Tiers = nil
+	} else if usesBatchInput || usesBatchOutput {
+		effective.Tiers = make([]core.ModelPricingTier, len(pricing.Tiers))
+		copy(effective.Tiers, pricing.Tiers)
+		for i := range effective.Tiers {
+			if usesBatchInput {
+				effective.Tiers[i].InputPerMtok = pricing.BatchInputPerMtok
+			}
+			if usesBatchOutput {
+				effective.Tiers[i].OutputPerMtok = pricing.BatchOutputPerMtok
+			}
+		}
 	}
 	return &effective
 }
