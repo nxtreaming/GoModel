@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log/slog"
 	"strings"
 
 	"gomodel/internal/core"
@@ -20,21 +21,29 @@ func resolvePassthroughProvider(provider core.RoutableProvider, routeProvider st
 
 	if provider != nil {
 		if named, ok := provider.(core.ProviderNameTypeResolver); ok {
-			if providerType := strings.TrimSpace(named.GetProviderTypeForName(routeProvider)); providerType != "" {
+			providerType := strings.TrimSpace(named.GetProviderTypeForName(routeProvider))
+			slog.Debug("passthrough provider resolution", "routeProvider", routeProvider, "resolvedType", providerType, "hasNameTypeResolver", true)
+			if providerType != "" {
 				return passthroughProviderResolution{
 					RouteProvider: routeProvider,
 					ProviderType:  providerType,
 					ProviderName:  routeProvider,
 				}
 			}
+		} else {
+			slog.Debug("passthrough provider resolution", "routeProvider", routeProvider, "hasNameTypeResolver", false)
 		}
+	} else {
+		slog.Debug("passthrough provider resolution", "routeProvider", routeProvider, "provider", "nil")
 	}
 
-	return passthroughProviderResolution{
+	result := passthroughProviderResolution{
 		RouteProvider: routeProvider,
 		ProviderType:  routeProvider,
 		ProviderName:  workflowProviderNameForType(provider, routeProvider),
 	}
+	slog.Debug("passthrough provider resolution fallback", "routeProvider", routeProvider, "providerType", result.ProviderType, "providerName", result.ProviderName)
+	return result
 }
 
 // passthroughAccessSelector derives an authorization selector from provider,

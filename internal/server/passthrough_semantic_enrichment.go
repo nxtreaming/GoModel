@@ -41,6 +41,7 @@ func PassthroughSemanticEnrichment(provider core.RoutableProvider, enrichers []c
 			}
 			info.NormalizedEndpoint = normalized
 			if resolved := resolvePassthroughProvider(provider, info.Provider); resolved.ProviderType != "" {
+				info.ProviderName = resolved.ProviderName
 				info.Provider = resolved.ProviderType
 			}
 

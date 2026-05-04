@@ -8,10 +8,11 @@ import (
 
 // PassthroughRequest is the transport-oriented request for opaque provider-native forwarding.
 type PassthroughRequest struct {
-	Method   string
-	Endpoint string
-	Body     io.ReadCloser
-	Headers  http.Header
+	Method       string
+	Endpoint     string
+	Body         io.ReadCloser
+	Headers      http.Header
+	ProviderName string // optional: concrete configured provider instance name for name-based routing
 }
 
 // PassthroughResponse is the raw upstream response for opaque forwarding.

@@ -25,7 +25,7 @@ func (s *passthroughService) ProviderPassthrough(c *echo.Context) error {
 		return handleError(c, core.NewInvalidRequestError("provider passthrough is not supported by the current provider router", nil))
 	}
 
-	providerType, endpoint, info, err := passthroughExecutionTarget(c, s.provider, s.normalizePassthroughV1Prefix)
+	providerType, providerName, endpoint, info, err := passthroughExecutionTarget(c, s.provider, s.normalizePassthroughV1Prefix)
 	if err != nil {
 		return handleError(c, err)
 	}
@@ -46,10 +46,11 @@ func (s *passthroughService) ProviderPassthrough(c *echo.Context) error {
 	ctx, _ := requestContextWithRequestID(c.Request())
 	c.SetRequest(c.Request().WithContext(ctx))
 	resp, err := passthroughProvider.Passthrough(ctx, providerType, &core.PassthroughRequest{
-		Method:   c.Request().Method,
-		Endpoint: endpoint,
-		Body:     c.Request().Body,
-		Headers:  buildPassthroughHeaders(ctx, c.Request().Header),
+		Method:       c.Request().Method,
+		Endpoint:     endpoint,
+		Body:         c.Request().Body,
+		Headers:      buildPassthroughHeaders(ctx, c.Request().Header),
+		ProviderName: providerName,
 	})
 	if err != nil {
 		return handleError(c, err)

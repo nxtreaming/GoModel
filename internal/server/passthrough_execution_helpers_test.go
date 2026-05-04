@@ -26,7 +26,7 @@ func TestPassthroughExecutionTarget_PrefersWorkflow(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	providerType, endpoint, info, err := passthroughExecutionTarget(c, nil, false)
+	providerType, _, endpoint, info, err := passthroughExecutionTarget(c, nil, false)
 	if err != nil {
 		t.Fatalf("passthroughExecutionTarget() error = %v", err)
 	}
@@ -50,7 +50,7 @@ func TestPassthroughExecutionTarget_NormalizesFallbackFromPath(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	providerType, endpoint, info, err := passthroughExecutionTarget(c, nil, true)
+	providerType, _, endpoint, info, err := passthroughExecutionTarget(c, nil, true)
 	if err != nil {
 		t.Fatalf("passthroughExecutionTarget() error = %v", err)
 	}
@@ -83,12 +83,15 @@ func TestPassthroughExecutionTarget_ResolvesConfiguredProviderNameToType(t *test
 		},
 	}
 
-	providerType, endpoint, info, err := passthroughExecutionTarget(c, provider, true)
+	providerType, providerName, endpoint, info, err := passthroughExecutionTarget(c, provider, true)
 	if err != nil {
 		t.Fatalf("passthroughExecutionTarget() error = %v", err)
 	}
 	if providerType != "openai" {
 		t.Fatalf("providerType = %q, want openai", providerType)
+	}
+	if providerName != "openai_test" {
+		t.Fatalf("providerName = %q, want openai_test", providerName)
 	}
 	if endpoint != "responses?trace=1" {
 		t.Fatalf("endpoint = %q, want responses?trace=1", endpoint)

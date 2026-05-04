@@ -36,7 +36,8 @@ type RouteHints struct {
 // WhiteBoxPrompt or Workflow, it should be treated as immutable by later
 // request stages.
 type PassthroughRouteInfo struct {
-	Provider           string
+	Provider           string // resolved provider type (e.g. "anthropic")
+	ProviderName       string // original configured provider instance name (e.g. "teste")
 	RawEndpoint        string
 	NormalizedEndpoint string
 	SemanticOperation  string

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -766,10 +767,29 @@ func (r *Router) NativeResponseProviderTypes() []string {
 }
 
 // Passthrough routes an opaque provider-native request by provider type.
+// If req.ProviderName is set, routing prefers the named provider instance over
+// the first registered provider of the given type.
 func (r *Router) Passthrough(ctx context.Context, providerType string, req *core.PassthroughRequest) (*core.PassthroughResponse, error) {
-	pp, err := r.resolvePassthroughProvider(providerType)
-	if err != nil {
-		return nil, err
+	var pp core.PassthroughProvider
+	if req != nil && strings.TrimSpace(req.ProviderName) != "" {
+		slog.DebugContext(ctx, "passthrough routing by name", "providerName", req.ProviderName, "providerType", providerType)
+		if p := r.providerByNameRegistry(strings.TrimSpace(req.ProviderName)); p != nil {
+			if named, ok := p.(core.PassthroughProvider); ok {
+				pp = named
+				slog.DebugContext(ctx, "passthrough routed by name", "providerName", req.ProviderName)
+			} else {
+				slog.DebugContext(ctx, "passthrough provider found by name but does not implement PassthroughProvider", "providerName", req.ProviderName)
+			}
+		} else {
+			slog.DebugContext(ctx, "passthrough provider not found by name, falling back to type", "providerName", req.ProviderName, "providerType", providerType)
+		}
+	}
+	if pp == nil {
+		var err error
+		pp, err = r.resolvePassthroughProvider(providerType)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return pp.Passthrough(ctx, req)
 }
