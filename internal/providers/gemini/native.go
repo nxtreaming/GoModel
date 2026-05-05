@@ -583,8 +583,11 @@ func geminiCachedContent(req *core.ChatRequest) string {
 	return cached
 }
 
-func nativeChatResponse(req *core.ChatRequest, geminiResp *geminiGenerateContentResponse) (*core.ChatResponse, error) {
-	if err := geminiBlockedPromptError(geminiResp); err != nil {
+func nativeChatResponse(req *core.ChatRequest, geminiResp *geminiGenerateContentResponse, providerName string) (*core.ChatResponse, error) {
+	if providerName == "" {
+		providerName = "gemini"
+	}
+	if err := geminiBlockedPromptError(geminiResp, providerName); err != nil {
 		return nil, err
 	}
 
@@ -598,7 +601,7 @@ func nativeChatResponse(req *core.ChatRequest, geminiResp *geminiGenerateContent
 		Object:   "chat.completion",
 		Created:  created,
 		Model:    req.Model,
-		Provider: "gemini",
+		Provider: providerName,
 		Choices:  make([]core.Choice, 0, len(geminiResp.Candidates)),
 		Usage:    usageFromGemini(geminiResp.UsageMetadata),
 	}
@@ -621,7 +624,7 @@ func nativeChatResponse(req *core.ChatRequest, geminiResp *geminiGenerateContent
 	return resp, nil
 }
 
-func geminiBlockedPromptError(resp *geminiGenerateContentResponse) *core.GatewayError {
+func geminiBlockedPromptError(resp *geminiGenerateContentResponse, providerName string) *core.GatewayError {
 	if resp == nil || len(resp.Candidates) > 0 {
 		return nil
 	}
@@ -629,7 +632,7 @@ func geminiBlockedPromptError(resp *geminiGenerateContentResponse) *core.Gateway
 	if reason == "" {
 		return nil
 	}
-	return nativeProviderError("Gemini blocked prompt: "+reason, nil)
+	return nativeProviderError(providerName, "Gemini blocked prompt: "+reason, nil)
 }
 
 func geminiPromptBlockReason(raw json.RawMessage) string {
@@ -811,10 +814,41 @@ func nativeStreamEndpoint(model string) string {
 
 func normalizeGeminiModelID(model string) string {
 	model = strings.TrimSpace(model)
+	if idx := strings.LastIndex(model, "/models/"); idx >= 0 {
+		model = model[idx+len("/models/"):]
+	}
 	model = strings.TrimPrefix(model, "models/")
+	model = strings.TrimPrefix(model, "google/")
 	return model
 }
 
-func nativeProviderError(message string, err error) *core.GatewayError {
-	return core.NewProviderError("gemini", http.StatusBadGateway, message, err)
+func vertexOpenAIModelID(model string) string {
+	model = normalizeGeminiModelID(model)
+	if model == "" {
+		return ""
+	}
+	return "google/" + model
+}
+
+func displayModelIDFromGemini(model, backend string) string {
+	model = normalizeGeminiModelID(model)
+	if backend == geminiBackendVertex && model != "" {
+		return "google/" + model
+	}
+	return model
+}
+
+// isGeminiExposedModel normalizes provider model names and exposes only the
+// model families reachable through Gemini/OpenAI-compatible text endpoints.
+// Families such as imagen-* use different upstream endpoints.
+func isGeminiExposedModel(modelID string) bool {
+	modelID = normalizeGeminiModelID(modelID)
+	return strings.HasPrefix(modelID, "gemini-") || strings.HasPrefix(modelID, "text-embedding-")
+}
+
+func nativeProviderError(providerName, message string, err error) *core.GatewayError {
+	if providerName == "" {
+		providerName = "gemini"
+	}
+	return core.NewProviderError(providerName, http.StatusBadGateway, message, err)
 }

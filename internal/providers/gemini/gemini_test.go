@@ -13,6 +13,9 @@ import (
 	"gomodel/internal/core"
 	"gomodel/internal/llmclient"
 	"gomodel/internal/providers"
+	"gomodel/internal/providers/googleauth"
+
+	"golang.org/x/oauth2"
 )
 
 func TestNew(t *testing.T) {
@@ -36,6 +39,64 @@ func TestNew_ReturnsProvider(t *testing.T) {
 
 	if provider == nil {
 		t.Error("provider should not be nil")
+	}
+}
+
+func TestNew_AIStudioRejectsGCPAuthAliases(t *testing.T) {
+	for _, authType := range []string{"adc", "service_account"} {
+		t.Run(authType, func(t *testing.T) {
+			provider := New(providers.ProviderConfig{
+				BaseURL:  defaultOpenAICompatibleBaseURL,
+				AuthType: authType,
+			}, providers.ProviderOptions{})
+
+			geminiProvider, ok := provider.(*Provider)
+			if !ok {
+				t.Fatalf("provider type = %T, want *Provider", provider)
+			}
+			err := geminiProvider.ready()
+			if err == nil {
+				t.Fatal("expected GCP auth alias to be rejected for AI Studio")
+			}
+			if !strings.Contains(err.Error(), "ai studio backend does not support GCP auth") {
+				t.Fatalf("error = %v, want AI Studio GCP auth rejection", err)
+			}
+		})
+	}
+}
+
+func TestNew_VertexAcceptsGCPAuthAliases(t *testing.T) {
+	for _, authType := range []string{"adc", "service_account"} {
+		t.Run(authType, func(t *testing.T) {
+			p := NewVertexWithHTTPClient(providers.ProviderConfig{
+				AuthType:       authType,
+				VertexProject:  "prod-ai",
+				VertexLocation: "us-central1",
+			}, providers.ProviderOptions{}, http.DefaultClient)
+
+			if err := p.ready(); err != nil {
+				t.Fatalf("ready() error = %v, want nil for Vertex auth alias", err)
+			}
+		})
+	}
+}
+
+func TestNew_VertexConfigErrorUsesVertexProviderName(t *testing.T) {
+	p := NewVertexWithHTTPClient(providers.ProviderConfig{
+		AuthType: "api_key",
+		BaseURL:  "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+	}, providers.ProviderOptions{}, http.DefaultClient)
+
+	err := p.ready()
+	if err == nil {
+		t.Fatal("expected config error, got nil")
+	}
+	var gatewayErr *core.GatewayError
+	if !errors.As(err, &gatewayErr) {
+		t.Fatalf("error = %T %[1]v, want *core.GatewayError", err)
+	}
+	if gatewayErr.Provider != "vertex" {
+		t.Fatalf("provider = %q, want vertex", gatewayErr.Provider)
 	}
 }
 
@@ -79,12 +140,130 @@ func TestGeminiBaseURLs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotCompat, gotNative := geminiBaseURLs(tt.configured)
+			gotCompat, gotNative := geminiBaseURLs(providers.ProviderConfig{BaseURL: tt.configured}, geminiBackendAIStudio)
 			if gotCompat != tt.wantCompat {
 				t.Fatalf("OpenAI-compatible base = %q, want %q", gotCompat, tt.wantCompat)
 			}
 			if gotNative != tt.wantNative {
 				t.Fatalf("native base = %q, want %q", gotNative, tt.wantNative)
+			}
+		})
+	}
+}
+
+func TestVertexBaseURLs(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        providers.ProviderConfig
+		wantCompat string
+		wantNative string
+	}{
+		{
+			name: "derives official vertex bases from project and location",
+			cfg: providers.ProviderConfig{
+				VertexProject:  "prod-ai",
+				VertexLocation: "us-central1",
+			},
+			wantCompat: "https://aiplatform.googleapis.com/v1/projects/prod-ai/locations/us-central1/endpoints/openapi",
+			wantNative: "https://aiplatform.googleapis.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+		},
+		{
+			name: "custom OpenAI-compatible vertex URL derives native sibling",
+			cfg: providers.ProviderConfig{
+				BaseURL: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/endpoints/openapi/",
+			},
+			wantCompat: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/endpoints/openapi",
+			wantNative: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+		},
+		{
+			name: "custom native vertex URL derives OpenAI-compatible sibling",
+			cfg: providers.ProviderConfig{
+				BaseURL: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/publishers/google/",
+			},
+			wantCompat: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/endpoints/openapi",
+			wantNative: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCompat, gotNative := geminiBaseURLs(tt.cfg, geminiBackendVertex)
+			if gotCompat != tt.wantCompat {
+				t.Fatalf("OpenAI-compatible base = %q, want %q", gotCompat, tt.wantCompat)
+			}
+			if gotNative != tt.wantNative {
+				t.Fatalf("native base = %q, want %q", gotNative, tt.wantNative)
+			}
+		})
+	}
+}
+
+func TestVertexModelsBaseURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		nativeBase string
+		want       string
+	}{
+		{
+			name:       "official vertex native base",
+			nativeBase: "https://aiplatform.googleapis.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+			want:       "https://aiplatform.googleapis.com/v1beta1/publishers/google",
+		},
+		{
+			name:       "custom proxy vertex native base",
+			nativeBase: "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+			want:       "https://proxy.example.com/v1beta1/publishers/google",
+		},
+		{
+			name:       "unknown custom base keeps native base",
+			nativeBase: "https://proxy.example.com/custom/gemini",
+			want:       "https://proxy.example.com/custom/gemini",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := geminiModelsBaseURL(geminiBackendVertex, tt.nativeBase); got != tt.want {
+				t.Fatalf("geminiModelsBaseURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewVertexWithHTTPClientAcceptsBaseURLWithoutProjectLocation(t *testing.T) {
+	p := NewVertexWithHTTPClient(providers.ProviderConfig{
+		BaseURL:  "https://proxy.example.com/v1/projects/prod-ai/locations/us-central1/publishers/google",
+		AuthType: "gcp_adc",
+	}, providers.ProviderOptions{}, http.DefaultClient)
+
+	if err := p.ready(); err != nil {
+		t.Fatalf("ready() error = %v, want nil for Vertex custom base URL", err)
+	}
+}
+
+func TestVertexModelNormalization(t *testing.T) {
+	tests := []struct {
+		in         string
+		wantNative string
+		wantOpenAI string
+	}{
+		{in: "gemini-2.5-flash", wantNative: "gemini-2.5-flash", wantOpenAI: "google/gemini-2.5-flash"},
+		{in: "models/gemini-2.5-flash", wantNative: "gemini-2.5-flash", wantOpenAI: "google/gemini-2.5-flash"},
+		{in: "google/gemini-2.5-flash", wantNative: "gemini-2.5-flash", wantOpenAI: "google/gemini-2.5-flash"},
+		{
+			in:         "projects/prod-ai/locations/us-central1/publishers/google/models/gemini-2.5-flash",
+			wantNative: "gemini-2.5-flash",
+			wantOpenAI: "google/gemini-2.5-flash",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := normalizeGeminiModelID(tt.in); got != tt.wantNative {
+				t.Fatalf("normalizeGeminiModelID() = %q, want %q", got, tt.wantNative)
+			}
+			if got := vertexOpenAIModelID(tt.in); got != tt.wantOpenAI {
+				t.Fatalf("vertexOpenAIModelID() = %q, want %q", got, tt.wantOpenAI)
 			}
 		})
 	}
@@ -111,8 +290,8 @@ func TestNew_CustomBaseURLDerivesNativeBaseURL(t *testing.T) {
 	if geminiProvider.modelsURL != "https://proxy.example.com/v1beta" {
 		t.Fatalf("modelsURL = %q, want derived native base URL", geminiProvider.modelsURL)
 	}
-	if geminiProvider.modelsClientConf.BaseURL != "https://proxy.example.com/v1beta" {
-		t.Fatalf("modelsClientConf.BaseURL = %q, want derived native base URL", geminiProvider.modelsClientConf.BaseURL)
+	if geminiProvider.nativeClient.BaseURL() != "https://proxy.example.com/v1beta" {
+		t.Fatalf("nativeClient.BaseURL() = %q, want derived native base URL", geminiProvider.nativeClient.BaseURL())
 	}
 }
 
@@ -202,8 +381,8 @@ func TestSetBaseURLDerivesModelsURL(t *testing.T) {
 	if provider.modelsURL != server.URL+"/v1beta" {
 		t.Fatalf("modelsURL = %q, want derived native base URL", provider.modelsURL)
 	}
-	if provider.modelsClientConf.BaseURL != server.URL+"/v1beta" {
-		t.Fatalf("modelsClientConf.BaseURL = %q, want derived native base URL", provider.modelsClientConf.BaseURL)
+	if provider.nativeClient.BaseURL() != server.URL+"/v1beta" {
+		t.Fatalf("nativeClient.BaseURL() = %q, want derived native base URL", provider.nativeClient.BaseURL())
 	}
 
 	resp, err := provider.ListModels(context.Background())
@@ -216,6 +395,379 @@ func TestSetBaseURLDerivesModelsURL(t *testing.T) {
 	if !modelsHit {
 		t.Fatal("models server was not called")
 	}
+}
+
+func TestVertexNativeChatUsesOAuthAuthorization(t *testing.T) {
+	t.Setenv(useNativeAPIEnvVar, "true")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/prod-ai/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent" {
+			t.Errorf("Path = %q, want Vertex native generateContent endpoint", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Errorf("Authorization = %q, want Bearer vertex-token", got)
+		}
+		if got := r.Header.Get("x-goog-api-key"); got != "" {
+			t.Errorf("x-goog-api-key = %q, want empty for Vertex OAuth", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"responseId": "vertex-native",
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": "ok"}]},
+				"finishReason": "STOP"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, true)
+	resp, err := p.ChatCompletion(context.Background(), &core.ChatRequest{
+		Model: "google/gemini-2.5-flash",
+		Messages: []core.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.ID != "vertex-native" {
+		t.Fatalf("response = %+v, want vertex-native", resp)
+	}
+	if resp.Provider != "vertex" {
+		t.Fatalf("provider = %q, want vertex", resp.Provider)
+	}
+}
+
+func TestVertexNativeBlockedPromptUsesVertexProviderName(t *testing.T) {
+	t.Setenv(useNativeAPIEnvVar, "true")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/prod-ai/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent" {
+			t.Errorf("Path = %q, want Vertex native generateContent endpoint", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"responseId": "vertex-blocked",
+			"promptFeedback": {
+				"blockReason": "SAFETY",
+				"blockReasonMessage": "unsafe prompt"
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, true)
+	_, err := p.ChatCompletion(context.Background(), &core.ChatRequest{
+		Model: "google/gemini-2.5-flash",
+		Messages: []core.Message{
+			{Role: "user", Content: "blocked"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected blocked prompt error, got nil")
+	}
+	var gatewayErr *core.GatewayError
+	if !errors.As(err, &gatewayErr) {
+		t.Fatalf("error = %T %[1]v, want *core.GatewayError", err)
+	}
+	if gatewayErr.Provider != "vertex" {
+		t.Fatalf("provider = %q, want vertex", gatewayErr.Provider)
+	}
+	if !strings.Contains(gatewayErr.Message, "SAFETY: unsafe prompt") {
+		t.Fatalf("message = %q, want block reason", gatewayErr.Message)
+	}
+}
+
+func TestVertexNativeStreamUsesVertexProviderName(t *testing.T) {
+	t.Setenv(useNativeAPIEnvVar, "true")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/prod-ai/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent" {
+			t.Errorf("Path = %q, want Vertex native streamGenerateContent endpoint", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Errorf("Authorization = %q, want Bearer vertex-token", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"responseId":"vertex-stream","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}
+
+`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, true)
+	body, err := p.StreamChatCompletion(context.Background(), &core.ChatRequest{
+		Model: "google/gemini-2.5-flash",
+		Messages: []core.Message{
+			{Role: "user", Content: "Hello"},
+		},
+		StreamOptions: &core.StreamOptions{IncludeUsage: true},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = body.Close() }()
+
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("failed to read stream: %v", err)
+	}
+	chunks := parseOpenAIStreamChunks(t, string(raw))
+	if len(chunks) == 0 {
+		t.Fatalf("stream = %q, want chunks", string(raw))
+	}
+	for _, chunk := range chunks {
+		if got := chunk["provider"]; got != "vertex" {
+			t.Fatalf("provider = %#v, want vertex in stream %q", got, string(raw))
+		}
+	}
+}
+
+func TestVertexNativeStreamResponsesUsesVertexProviderName(t *testing.T) {
+	t.Setenv(useNativeAPIEnvVar, "true")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/prod-ai/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent" {
+			t.Errorf("Path = %q, want Vertex native streamGenerateContent endpoint", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"responseId":"vertex-responses-stream","candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}
+
+`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, true)
+	body, err := p.StreamResponses(context.Background(), &core.ResponsesRequest{
+		Model: "google/gemini-2.5-flash",
+		Input: "Hello",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = body.Close() }()
+
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("failed to read stream: %v", err)
+	}
+	stream := string(raw)
+	if !strings.Contains(stream, `"provider":"vertex"`) {
+		t.Fatalf("stream = %q, want vertex provider metadata", stream)
+	}
+}
+
+func TestVertexOpenAICompatibleChatUsesOAuthAndGoogleModelPrefix(t *testing.T) {
+	t.Setenv(useNativeAPIEnvVar, "false")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/prod-ai/locations/us-central1/endpoints/openapi/chat/completions" {
+			t.Errorf("Path = %q, want Vertex OpenAI-compatible chat endpoint", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Errorf("Authorization = %q, want Bearer vertex-token", got)
+		}
+		if got := r.Header.Get("x-goog-api-key"); got != "" {
+			t.Errorf("x-goog-api-key = %q, want empty for Vertex OAuth", got)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		if got := payload["model"]; got != "google/gemini-2.5-flash" {
+			t.Fatalf("model = %#v, want google/gemini-2.5-flash", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id": "vertex-openai",
+			"object": "chat.completion",
+			"created": 1677652288,
+			"model": "google/gemini-2.5-flash",
+			"choices": [{
+				"index": 0,
+				"message": {"role": "assistant", "content": "ok"},
+				"finish_reason": "stop"
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, false)
+	resp, err := p.ChatCompletion(context.Background(), &core.ChatRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []core.Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.ID != "vertex-openai" {
+		t.Fatalf("response = %+v, want vertex-openai", resp)
+	}
+	if resp.Provider != "vertex" {
+		t.Fatalf("provider = %q, want vertex", resp.Provider)
+	}
+}
+
+func TestVertexOpenAICompatibleEmbeddingsUsesOAuthAndGoogleModelPrefix(t *testing.T) {
+	t.Setenv(useNativeAPIEnvVar, "false")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/projects/prod-ai/locations/us-central1/endpoints/openapi/embeddings" {
+			t.Errorf("Path = %q, want Vertex OpenAI-compatible embeddings endpoint", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Errorf("Authorization = %q, want Bearer vertex-token", got)
+		}
+		if got := r.Header.Get("x-goog-api-key"); got != "" {
+			t.Errorf("x-goog-api-key = %q, want empty for Vertex OAuth", got)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode request: %v", err)
+		}
+		if got := payload["model"]; got != "google/text-embedding-005" {
+			t.Fatalf("model = %#v, want google/text-embedding-005", got)
+		}
+		if got := payload["input"]; got != "text" {
+			t.Fatalf("input = %#v, want text", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"object": "list",
+			"model": "google/text-embedding-005",
+			"data": [{
+				"object": "embedding",
+				"embedding": [0.1, 0.2],
+				"index": 0
+			}],
+			"usage": {"prompt_tokens": 1, "total_tokens": 1}
+		}`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, false)
+	resp, err := p.Embeddings(context.Background(), &core.EmbeddingRequest{
+		Model: "text-embedding-005",
+		Input: "text",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp == nil || resp.Model != "google/text-embedding-005" {
+		t.Fatalf("response = %+v, want google/text-embedding-005", resp)
+	}
+	if resp.Provider != "vertex" {
+		t.Fatalf("provider = %q, want vertex", resp.Provider)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("data = %+v, want one embedding", resp.Data)
+	}
+	var embedding []float64
+	if err := json.Unmarshal(resp.Data[0].Embedding, &embedding); err != nil {
+		t.Fatalf("embedding = %s, want float array: %v", string(resp.Data[0].Embedding), err)
+	}
+	if len(embedding) != 2 || embedding[0] != 0.1 || embedding[1] != 0.2 {
+		t.Fatalf("embedding = %v, want [0.1 0.2]", embedding)
+	}
+}
+
+func TestVertexListModelsAcceptsPublisherModelsResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1beta1/publishers/google/models" {
+			t.Errorf("Path = %q, want Vertex publisher models endpoint", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer vertex-token" {
+			t.Errorf("Authorization = %q, want Bearer vertex-token", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"publisherModels": [
+				{"name": "publishers/google/models/gemini-2.5-flash"},
+				{"name": "publishers/google/models/text-embedding-005"},
+				{"name": "publishers/google/models/imagen-4.0"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	p := newVertexTestProvider(server, true)
+	resp, err := p.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Data) != 2 {
+		t.Fatalf("models = %+v, want 2 Gemini-compatible models", resp.Data)
+	}
+	if resp.Data[0].ID != "google/gemini-2.5-flash" || resp.Data[1].ID != "google/text-embedding-005" {
+		t.Fatalf("models = %+v, want google/gemini-2.5-flash and google/text-embedding-005", resp.Data)
+	}
+}
+
+func TestVertexListModelsErrorsUseVertexProviderName(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "native parse error",
+			body: `{"publisherModels":"bad"}`,
+		},
+		{
+			name: "unexpected format",
+			body: `{"unexpected":true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			p := newVertexTestProvider(server, true)
+			_, err := p.ListModels(context.Background())
+			if err == nil {
+				t.Fatal("expected models error, got nil")
+			}
+			var gatewayErr *core.GatewayError
+			if !errors.As(err, &gatewayErr) {
+				t.Fatalf("error = %T %[1]v, want *core.GatewayError", err)
+			}
+			if gatewayErr.Provider != "vertex" {
+				t.Fatalf("provider = %q, want vertex", gatewayErr.Provider)
+			}
+		})
+	}
+}
+
+func newVertexTestProvider(server *httptest.Server, native bool) *Provider {
+	tokenClient := googleauth.HTTPClient(server.Client(), oauth2.StaticTokenSource(&oauth2.Token{
+		AccessToken: "vertex-token",
+		TokenType:   "Bearer",
+	}))
+	p := &Provider{
+		backend:      geminiBackendVertex,
+		authType:     geminiAuthTypeGCPADC,
+		useNativeAPI: native,
+	}
+	openAIBaseURL := server.URL + "/v1/projects/prod-ai/locations/us-central1/endpoints/openapi"
+	nativeBaseURL := server.URL + "/v1/projects/prod-ai/locations/us-central1/publishers/google"
+	modelsBaseURL := server.URL + "/v1beta1/publishers/google"
+	openAICfg := llmclient.DefaultConfig("vertex", openAIBaseURL)
+	nativeCfg := llmclient.DefaultConfig("vertex", nativeBaseURL)
+	modelsCfg := llmclient.DefaultConfig("vertex", modelsBaseURL)
+	p.client = llmclient.NewWithHTTPClient(tokenClient, openAICfg, p.setHeaders)
+	p.nativeClient = llmclient.NewWithHTTPClient(tokenClient, nativeCfg, p.setNativeHeaders)
+	p.modelsClient = llmclient.NewWithHTTPClient(tokenClient, modelsCfg, p.setNativeHeaders)
+	p.modelsURL = modelsBaseURL
+	return p
 }
 
 func TestChatCompletion(t *testing.T) {
@@ -257,6 +809,9 @@ func TestChatCompletion(t *testing.T) {
 				}
 				if resp.Model != "gemini-2.0-flash" {
 					t.Errorf("Model = %q, want %q", resp.Model, "gemini-2.0-flash")
+				}
+				if resp.Provider != "gemini" {
+					t.Errorf("Provider = %q, want gemini", resp.Provider)
 				}
 				if len(resp.Choices) != 1 {
 					t.Fatalf("len(Choices) = %d, want 1", len(resp.Choices))
